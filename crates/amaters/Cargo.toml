@@ -1,0 +1,31 @@
+[package]
+name = "amaters"
+description = "AmateRS - Fully Homomorphic Encrypted Distributed Database with Zero Trust Architecture"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords = ["database", "fhe", "encryption", "distributed", "zero-trust"]
+categories = ["database", "cryptography", "network-programming"]
+
+[dependencies]
+amaters-core = { workspace = true }
+amaters-net = { workspace = true }
+amaters-cluster = { workspace = true }
+amaters-sdk-rust = { workspace = true }
+# Note: amaters-server and amaters-cli are binary crates, not included in the meta crate
+
+[features]
+default = []
+full = ["mtls", "fhe"]
+mtls = ["amaters-net/mtls"]
+fhe = ["amaters-sdk-rust/fhe"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -1,0 +1,64 @@
+# Example roles configuration for AmateRS Server
+# This file defines custom roles and their permissions
+
+[[roles]]
+name = "admin"
+description = "Administrator with full access to all resources"
+permissions = [
+    { resource = "*", actions = ["admin"] }
+]
+inherits = []
+
+[[roles]]
+name = "power_user"
+description = "Power user with admin access to specific collections"
+permissions = [
+    { resource = "collection:*", actions = ["read", "write", "admin"] },
+    { resource = "server", actions = ["read"] }
+]
+inherits = []
+
+[[roles]]
+name = "user"
+description = "Regular user with read/write access to collections"
+permissions = [
+    { resource = "collection:*", actions = ["read", "write"] }
+]
+inherits = []
+
+[[roles]]
+name = "reader"
+description = "Read-only user"
+permissions = [
+    { resource = "collection:*", actions = ["read"] }
+]
+inherits = []
+
+[[roles]]
+name = "data_scientist"
+description = "Data scientist with read access and limited write access"
+permissions = [
+    { resource = "collection:datasets", actions = ["read", "write"] },
+    { resource = "collection:models", actions = ["read"] },
+    { resource = "collection:results", actions = ["read", "write"] }
+]
+inherits = ["reader"]
+
+[[roles]]
+name = "auditor"
+description = "Auditor with read-only access to all collections and audit logs"
+permissions = [
+    { resource = "collection:*", actions = ["read"] },
+    { resource = "server", actions = ["read"] }
+]
+inherits = []
+
+# Example of a service account role
+[[roles]]
+name = "service_account"
+description = "Automated service with specific collection access"
+permissions = [
+    { resource = "collection:events", actions = ["write"] },
+    { resource = "collection:metrics", actions = ["write"] }
+]
+inherits = []

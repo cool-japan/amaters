@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "outDir": "dist/node",
+    "noEmit": false,
+    "declaration": false,
+    "allowImportingTsExtensions": false
+  },
+  "include": ["src/ts/**/*"],
+  "exclude": ["node_modules", "dist", "pkg", "examples"]
+}

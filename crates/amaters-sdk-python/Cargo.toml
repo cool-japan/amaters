@@ -1,0 +1,42 @@
+[package]
+name = "amaters-sdk-python"
+description = "Python SDK for AmateRS with PyO3 bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["python", "sdk", "bindings", "database", "fhe"]
+categories = ["api-bindings", "database"]
+
+[lib]
+name = "amaters"
+crate-type = ["cdylib"]
+
+[dependencies]
+amaters-core = { workspace = true }
+amaters-sdk-rust = { workspace = true }
+tokio = { workspace = true, features = ["full", "rt-multi-thread"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tfhe = { workspace = true, optional = true }
+oxicode = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+# PyO3 dependencies
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py38", "anyhow"] }
+pyo3-asyncio-0-21 = { version = "0.23", features = ["tokio-runtime", "attributes"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []
+fhe = ["tfhe", "amaters-sdk-rust/fhe"]
+serialization = ["serde", "serde_json", "oxicode", "amaters-sdk-rust/serialization"]
+
+[lints]
+workspace = true

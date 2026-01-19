@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package amaters.query;
+
+import "types.proto";
+
+// Query message - top-level query operations
+message Query {
+  oneof query {
+    // Get a single value by key
+    GetQuery get = 1;
+    // Set a value
+    SetQuery set = 2;
+    // Delete a key
+    DeleteQuery delete = 3;
+    // Filter collection by predicate
+    FilterQuery filter = 4;
+    // Update values matching predicate
+    UpdateQuery update = 5;
+    // Range scan
+    RangeQuery range = 6;
+  }
+}
+
+// Get query - retrieve a single value by key
+message GetQuery {
+  // Collection name
+  string collection = 1;
+  // Key to retrieve
+  amaters.types.Key key = 2;
+}
+
+// Set query - store a value
+message SetQuery {
+  // Collection name
+  string collection = 1;
+  // Key to store at
+  amaters.types.Key key = 2;
+  // Encrypted value to store
+  amaters.types.CipherBlob value = 3;
+}
+
+// Delete query - remove a key
+message DeleteQuery {
+  // Collection name
+  string collection = 1;
+  // Key to delete
+  amaters.types.Key key = 2;
+}
+
+// Filter query - retrieve values matching a predicate
+message FilterQuery {
+  // Collection name
+  string collection = 1;
+  // Predicate to filter by
+  amaters.types.Predicate predicate = 2;
+  // Optional limit on number of results
+  optional uint32 limit = 3;
+  // Optional offset for pagination
+  optional uint32 offset = 4;
+}
+
+// Update query - update values matching a predicate
+message UpdateQuery {
+  // Collection name
+  string collection = 1;
+  // Predicate to filter by
+  amaters.types.Predicate predicate = 2;
+  // Update operations to apply
+  repeated amaters.types.Update updates = 3;
+}
+
+// Range query - retrieve keys in a range
+message RangeQuery {
+  // Collection name
+  string collection = 1;
+  // Start key (inclusive)
+  amaters.types.Key start = 2;
+  // End key (exclusive)
+  amaters.types.Key end = 3;
+  // Optional limit on number of results
+  optional uint32 limit = 4;
+}
+
+// Query result
+message QueryResult {
+  oneof result {
+    // Single value result
+    SingleResult single = 1;
+    // Multiple values result
+    MultiResult multi = 2;
+    // Success result (no data)
+    SuccessResult success = 3;
+  }
+}
+
+// Single value result
+message SingleResult {
+  // The retrieved value (None if not found)
+  optional amaters.types.CipherBlob value = 1;
+}
+
+// Multiple values result
+message MultiResult {
+  // The retrieved values
+  repeated KeyValue values = 2;
+}
+
+// Key-value pair
+message KeyValue {
+  amaters.types.Key key = 1;
+  amaters.types.CipherBlob value = 2;
+}
+
+// Success result (for operations that don't return data)
+message SuccessResult {
+  // Number of rows affected
+  uint64 affected_rows = 1;
+}

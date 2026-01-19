@@ -1,0 +1,81 @@
+[package]
+name = "amaters-core"
+description = "Core kernel for AmateRS - Fully Homomorphic Encrypted Database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords = ["fhe", "database", "encryption", "privacy", "tfhe"]
+categories = ["cryptography", "database-implementations", "algorithms"]
+
+[dependencies]
+# FHE
+tfhe = { workspace = true, features = ["boolean", "shortint", "integer"], optional = true }
+
+# Async
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "io-util", "sync"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+rkyv = { workspace = true }
+oxicode = { workspace = true }
+bincode = { workspace = true, optional = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Collections
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+
+# Parallelism
+rayon = { workspace = true, optional = true }
+crossbeam = { workspace = true }
+
+# Utilities
+bytemuck = { workspace = true }
+memmap2 = { workspace = true, optional = true }
+crc32fast = { workspace = true }
+blake3 = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+approx = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+criterion = { workspace = true }
+
+[features]
+default = ["storage", "compute"]
+storage = []
+compute = ["tfhe", "bincode"]
+parallel = ["rayon"]
+mmap = ["memmap2"]
+gpu = []
+cuda = ["gpu"]
+metal = ["gpu"]
+
+[lib]
+name = "amaters_core"
+path = "src/lib.rs"
+
+[[bench]]
+name = "core_bench"
+harness = false
+
+[[bench]]
+name = "storage_bench"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AmateRS TypeScript SDK - Browser Example</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        header {
+            text-align: center;
+            padding: 40px 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            opacity: 0.9;
+            font-size: 1.1rem;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        input, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .output {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            min-height: 200px;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        .output .success {
+            color: #4ec9b0;
+        }
+
+        .output .error {
+            color: #f14c4c;
+        }
+
+        .output .info {
+            color: #569cd6;
+        }
+
+        .output .warn {
+            color: #dcdcaa;
+        }
+
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f8f8f8;
+            border-radius: 5px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ccc;
+        }
+
+        .status-indicator.connected {
+            background: #4caf50;
+            box-shadow: 0 0 8px rgba(76, 175, 80, 0.5);
+        }
+
+        .status-indicator.disconnected {
+            background: #f44336;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 10px;
+            background: #f8f8f8;
+            border-radius: 5px;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: #666;
+        }
+
+        .full-width {
+            grid-column: 1 / -1;
+        }
+
+        footer {
+            text-align: center;
+            padding: 20px;
+            margin-top: 30px;
+            color: #666;
+        }
+
+        footer a {
+            color: #667eea;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>AmateRS SDK</h1>
+        <p class="subtitle">Fully Homomorphic Encrypted Database - Browser Demo</p>
+    </header>
+
+    <div class="container">
+        <!-- Connection Card -->
+        <div class="card">
+            <h2>Connection</h2>
+            <div class="status-bar">
+                <span class="status-indicator" id="connectionStatus"></span>
+                <span id="connectionText">Disconnected</span>
+            </div>
+            <div class="form-group">
+                <label for="serverAddr">Server Address</label>
+                <input type="text" id="serverAddr" value="http://localhost:50051" />
+            </div>
+            <div class="button-group">
+                <button id="connectBtn" onclick="connect()">Connect</button>
+                <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+                <button id="healthBtn" onclick="healthCheck()" disabled>Health Check</button>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-value" id="totalConn">0</div>
+                    <div class="stat-label">Total</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="activeConn">0</div>
+                    <div class="stat-label">Active</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="idleConn">0</div>
+                    <div class="stat-label">Idle</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Set Value Card -->
+        <div class="card">
+            <h2>Set Value</h2>
+            <div class="form-group">
+                <label for="setCollection">Collection</label>
+                <input type="text" id="setCollection" value="users" />
+            </div>
+            <div class="form-group">
+                <label for="setKey">Key</label>
+                <input type="text" id="setKey" value="user:123" />
+            </div>
+            <div class="form-group">
+                <label for="setValue">Value (JSON)</label>
+                <textarea id="setValue" rows="3">{"name": "Alice", "email": "alice@example.com"}</textarea>
+            </div>
+            <button onclick="setValue()" id="setBtn" disabled>Set Value</button>
+        </div>
+
+        <!-- Get Value Card -->
+        <div class="card">
+            <h2>Get Value</h2>
+            <div class="form-group">
+                <label for="getCollection">Collection</label>
+                <input type="text" id="getCollection" value="users" />
+            </div>
+            <div class="form-group">
+                <label for="getKey">Key</label>
+                <input type="text" id="getKey" value="user:123" />
+            </div>
+            <div class="button-group">
+                <button onclick="getValue()" id="getBtn" disabled>Get Value</button>
+                <button onclick="deleteValue()" id="deleteBtn" disabled>Delete</button>
+                <button onclick="checkExists()" id="existsBtn" disabled>Exists?</button>
+            </div>
+        </div>
+
+        <!-- Range Query Card -->
+        <div class="card">
+            <h2>Range Query</h2>
+            <div class="form-group">
+                <label for="rangeCollection">Collection</label>
+                <input type="text" id="rangeCollection" value="users" />
+            </div>
+            <div class="form-group">
+                <label for="rangeStart">Start Key</label>
+                <input type="text" id="rangeStart" value="user:1" />
+            </div>
+            <div class="form-group">
+                <label for="rangeEnd">End Key</label>
+                <input type="text" id="rangeEnd" value="user:999" />
+            </div>
+            <button onclick="rangeQuery()" id="rangeBtn" disabled>Execute Range Query</button>
+        </div>
+
+        <!-- Output Console -->
+        <div class="card full-width">
+            <h2>Console Output</h2>
+            <div class="output" id="output">AmateRS SDK Browser Demo initialized.
+Waiting for WASM module...
+
+<span class="info">Note: This demo requires the WASM module to be built first.</span>
+<span class="info">Run: ./build.sh all</span>
+<span class="info">Then serve this file with a web server.</span>
+</div>
+            <button onclick="clearOutput()" style="margin-top: 10px;">Clear Console</button>
+        </div>
+    </div>
+
+    <footer>
+        <p>
+            AmateRS SDK v0.1.0 |
+            <a href="https://github.com/cool-japan/amaters" target="_blank">GitHub</a> |
+            <a href="https://docs.rs/amaters" target="_blank">Documentation</a>
+        </p>
+    </footer>
+
+    <script type="module">
+        // Import WASM module (uncomment after building)
+        // import init, {
+        //     AmateRSClient,
+        //     Key,
+        //     CipherBlob,
+        //     ClientConfig,
+        //     QueryBuilder,
+        //     col,
+        //     getVersion,
+        // } from '../pkg/web/amaters_sdk.js';
+
+        // Global state
+        let client = null;
+        let isConnected = false;
+
+        // Make functions available globally
+        window.connect = connect;
+        window.disconnect = disconnect;
+        window.healthCheck = healthCheck;
+        window.setValue = setValue;
+        window.getValue = getValue;
+        window.deleteValue = deleteValue;
+        window.checkExists = checkExists;
+        window.rangeQuery = rangeQuery;
+        window.clearOutput = clearOutput;
+
+        // Output helpers
+        function log(message, type = 'info') {
+            const output = document.getElementById('output');
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `[${new Date().toLocaleTimeString()}] ${message}\n`;
+            output.appendChild(span);
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function clearOutput() {
+            document.getElementById('output').innerHTML = '';
+            log('Console cleared', 'info');
+        }
+
+        // Connection management
+        async function connect() {
+            const addr = document.getElementById('serverAddr').value;
+            log(`Connecting to ${addr}...`, 'info');
+
+            try {
+                // Uncomment when WASM is built:
+                // client = await AmateRSClient.connect(addr);
+
+                // Mock for demo:
+                await new Promise(resolve => setTimeout(resolve, 500));
+                client = {
+                    isConnected: true,
+                    poolStats: { totalConnections: 1, activeConnections: 1, idleConnections: 0 },
+                    set: async () => { await new Promise(r => setTimeout(r, 100)); },
+                    get: async () => { await new Promise(r => setTimeout(r, 100)); return null; },
+                    delete: async () => { await new Promise(r => setTimeout(r, 100)); },
+                    contains: async () => { await new Promise(r => setTimeout(r, 100)); return false; },
+                    range: async () => { await new Promise(r => setTimeout(r, 100)); return []; },
+                    healthCheck: async () => { await new Promise(r => setTimeout(r, 100)); return true; },
+                    close: () => {},
+                };
+
+                isConnected = true;
+                updateConnectionUI();
+                log('Connected successfully!', 'success');
+            } catch (error) {
+                log(`Connection failed: ${error.message}`, 'error');
+            }
+        }
+
+        async function disconnect() {
+            if (client) {
+                client.close();
+                client = null;
+            }
+            isConnected = false;
+            updateConnectionUI();
+            log('Disconnected', 'warn');
+        }
+
+        async function healthCheck() {
+            if (!client) {
+                log('Not connected', 'error');
+                return;
+            }
+
+            try {
+                log('Performing health check...', 'info');
+                const healthy = await client.healthCheck();
+                log(`Health check: ${healthy ? 'HEALTHY' : 'UNHEALTHY'}`, healthy ? 'success' : 'error');
+            } catch (error) {
+                log(`Health check failed: ${error.message}`, 'error');
+            }
+        }
+
+        function updateConnectionUI() {
+            const indicator = document.getElementById('connectionStatus');
+            const text = document.getElementById('connectionText');
+            const buttons = ['setBtn', 'getBtn', 'deleteBtn', 'existsBtn', 'rangeBtn', 'healthBtn'];
+
+            if (isConnected) {
+                indicator.classList.add('connected');
+                indicator.classList.remove('disconnected');
+                text.textContent = 'Connected';
+                document.getElementById('connectBtn').disabled = true;
+                document.getElementById('disconnectBtn').disabled = false;
+                buttons.forEach(id => document.getElementById(id).disabled = false);
+
+                // Update stats
+                if (client && client.poolStats) {
+                    document.getElementById('totalConn').textContent = client.poolStats.totalConnections;
+                    document.getElementById('activeConn').textContent = client.poolStats.activeConnections;
+                    document.getElementById('idleConn').textContent = client.poolStats.idleConnections;
+                }
+            } else {
+                indicator.classList.remove('connected');
+                indicator.classList.add('disconnected');
+                text.textContent = 'Disconnected';
+                document.getElementById('connectBtn').disabled = false;
+                document.getElementById('disconnectBtn').disabled = true;
+                buttons.forEach(id => document.getElementById(id).disabled = true);
+
+                document.getElementById('totalConn').textContent = '0';
+                document.getElementById('activeConn').textContent = '0';
+                document.getElementById('idleConn').textContent = '0';
+            }
+        }
+
+        // CRUD operations
+        async function setValue() {
+            const collection = document.getElementById('setCollection').value;
+            const key = document.getElementById('setKey').value;
+            const value = document.getElementById('setValue').value;
+
+            try {
+                log(`Setting ${collection}/${key}...`, 'info');
+
+                // Uncomment when WASM is built:
+                // const keyObj = Key.fromString(key);
+                // const blob = CipherBlob.fromBytes(new TextEncoder().encode(value));
+                // await client.set(collection, keyObj, blob);
+
+                // Mock for demo:
+                await client.set();
+
+                log(`Set ${collection}/${key} successfully`, 'success');
+            } catch (error) {
+                log(`Set failed: ${error.message}`, 'error');
+            }
+        }
+
+        async function getValue() {
+            const collection = document.getElementById('getCollection').value;
+            const key = document.getElementById('getKey').value;
+
+            try {
+                log(`Getting ${collection}/${key}...`, 'info');
+
+                // Uncomment when WASM is built:
+                // const keyObj = Key.fromString(key);
+                // const result = await client.get(collection, keyObj);
+
+                // Mock for demo:
+                const result = await client.get();
+
+                if (result) {
+                    // const decoded = new TextDecoder().decode(result.toBytes());
+                    // log(`Value: ${decoded}`, 'success');
+                    log('Value found (mock)', 'success');
+                } else {
+                    log('Key not found', 'warn');
+                }
+            } catch (error) {
+                log(`Get failed: ${error.message}`, 'error');
+            }
+        }
+
+        async function deleteValue() {
+            const collection = document.getElementById('getCollection').value;
+            const key = document.getElementById('getKey').value;
+
+            try {
+                log(`Deleting ${collection}/${key}...`, 'info');
+                await client.delete();
+                log(`Deleted ${collection}/${key}`, 'success');
+            } catch (error) {
+                log(`Delete failed: ${error.message}`, 'error');
+            }
+        }
+
+        async function checkExists() {
+            const collection = document.getElementById('getCollection').value;
+            const key = document.getElementById('getKey').value;
+
+            try {
+                log(`Checking if ${collection}/${key} exists...`, 'info');
+                const exists = await client.contains();
+                log(`Key exists: ${exists}`, exists ? 'success' : 'warn');
+            } catch (error) {
+                log(`Check failed: ${error.message}`, 'error');
+            }
+        }
+
+        async function rangeQuery() {
+            const collection = document.getElementById('rangeCollection').value;
+            const start = document.getElementById('rangeStart').value;
+            const end = document.getElementById('rangeEnd').value;
+
+            try {
+                log(`Range query: ${collection} [${start}, ${end})...`, 'info');
+                const items = await client.range();
+                log(`Found ${items.length} items`, 'success');
+
+                for (const item of items) {
+                    // log(`  ${item.key.toString()}: ${item.value.length} bytes`, 'info');
+                }
+            } catch (error) {
+                log(`Range query failed: ${error.message}`, 'error');
+            }
+        }
+
+        // Initialize
+        async function init() {
+            try {
+                // Uncomment when WASM is built:
+                // await init();
+                // log(`WASM module loaded. SDK version: ${getVersion()}`, 'success');
+
+                log('Demo mode active (WASM not loaded)', 'warn');
+                log('Build WASM module with: ./build.sh all', 'info');
+            } catch (error) {
+                log(`Failed to initialize WASM: ${error.message}`, 'error');
+            }
+
+            updateConnectionUI();
+        }
+
+        // Start initialization
+        init();
+    </script>
+</body>
+</html>

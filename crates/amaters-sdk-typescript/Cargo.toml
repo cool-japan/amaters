@@ -1,0 +1,69 @@
+[package]
+name = "amaters-sdk-typescript"
+description = "TypeScript/WASM SDK for AmateRS - Fully Homomorphic Encrypted Database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["wasm", "typescript", "sdk", "database", "fhe"]
+categories = ["wasm", "api-bindings", "database"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Internal crates
+amaters-core = { workspace = true }
+amaters-sdk-rust = { workspace = true }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "Performance",
+    "PerformanceTiming",
+] }
+
+# Serialization for JS interop
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde-wasm-bindgen = "0.6"
+
+# Error handling
+thiserror = { workspace = true }
+
+# Async runtime for WASM
+tokio = { version = "1.49", default-features = false, features = ["sync"] }
+
+# Timers for WASM
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+# Console logging for WASM
+console_error_panic_hook = { version = "0.1", optional = true }
+tracing-wasm = "0.2"
+tracing = { workspace = true }
+
+# Optional FHE support
+tfhe = { workspace = true, optional = true }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+default = ["console_error_panic_hook"]
+fhe = ["tfhe", "amaters-sdk-rust/fhe"]
+serialization = ["amaters-sdk-rust/serialization"]
+
+[lints]
+workspace = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Os"]
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false

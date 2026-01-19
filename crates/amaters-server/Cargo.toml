@@ -1,0 +1,54 @@
+[package]
+name = "amaters-server"
+description = "AmateRS server binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["database", "server"]
+categories = ["database-implementations"]
+
+[dependencies]
+amaters-core = { workspace = true }
+amaters-net = { workspace = true }
+amaters-cluster = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+rustls = { workspace = true }
+async-trait = { workspace = true }
+# Authentication and authorization
+jsonwebtoken = { version = "10.2", features = ["rust_crypto"] }
+x509-parser = "0.18"
+base64 = "0.22"
+sha2 = "0.10"
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+amaters-sdk-rust = { workspace = true }
+
+[features]
+default = ["compute"]
+compute = ["amaters-core/compute", "amaters-net/compute"]
+
+[lib]
+name = "amaters_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "amaters-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true

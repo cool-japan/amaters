@@ -1,0 +1,22 @@
+[package]
+name = "amaters-cluster"
+description = "Consensus layer for AmateRS (Ukehi)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["consensus", "raft", "distributed"]
+categories = ["algorithms", "database-implementations"]
+
+[dependencies]
+amaters-core = { workspace = true }
+# amaters-net = { workspace = true }  # TODO: Re-enable when needed
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+
+[lints]
+workspace = true

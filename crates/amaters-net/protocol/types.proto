@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package amaters.types;
+
+// Protocol version for compatibility checking
+message Version {
+  uint32 major = 1;
+  uint32 minor = 2;
+  uint32 patch = 3;
+}
+
+// Encrypted data blob with metadata
+message CipherBlob {
+  // Encrypted data bytes
+  bytes data = 1;
+
+  // Metadata for integrity and compression
+  CipherMetadata metadata = 2;
+}
+
+// Metadata for encrypted blob
+message CipherMetadata {
+  // Uncompressed size in bytes
+  uint64 size = 1;
+
+  // Compression type
+  CompressionType compression = 2;
+
+  // CRC32 checksum for integrity
+  uint32 checksum = 3;
+
+  // Creation timestamp (Unix epoch seconds)
+  int64 created_at = 4;
+
+  // Optional version tag
+  optional uint32 version = 5;
+}
+
+// Compression type enumeration
+enum CompressionType {
+  COMPRESSION_NONE = 0;
+  COMPRESSION_LZ4 = 1;
+  COMPRESSION_ZSTD = 2;
+}
+
+// Database key
+message Key {
+  // Key bytes
+  bytes data = 1;
+}
+
+// Column reference for predicates
+message ColumnRef {
+  // Column name
+  string name = 1;
+}
+
+// Predicate for filtering (executed on encrypted data via FHE)
+message Predicate {
+  oneof predicate {
+    // Equality test
+    EqPredicate eq = 1;
+    // Greater than
+    GtPredicate gt = 2;
+    // Less than
+    LtPredicate lt = 3;
+    // Greater than or equal
+    GtePredicate gte = 4;
+    // Less than or equal
+    LtePredicate lte = 5;
+    // Logical AND
+    AndPredicate and = 6;
+    // Logical OR
+    OrPredicate or = 7;
+    // Logical NOT
+    NotPredicate not = 8;
+  }
+}
+
+message EqPredicate {
+  ColumnRef column = 1;
+  CipherBlob value = 2;
+}
+
+message GtPredicate {
+  ColumnRef column = 1;
+  CipherBlob value = 2;
+}
+
+message LtPredicate {
+  ColumnRef column = 1;
+  CipherBlob value = 2;
+}
+
+message GtePredicate {
+  ColumnRef column = 1;
+  CipherBlob value = 2;
+}
+
+message LtePredicate {
+  ColumnRef column = 1;
+  CipherBlob value = 2;
+}
+
+message AndPredicate {
+  Predicate left = 1;
+  Predicate right = 2;
+}
+
+message OrPredicate {
+  Predicate left = 1;
+  Predicate right = 2;
+}
+
+message NotPredicate {
+  Predicate predicate = 1;
+}
+
+// Update operation
+message Update {
+  oneof operation {
+    // Set column to value
+    SetUpdate set = 1;
+    // Add to column (FHE addition)
+    AddUpdate add = 2;
+    // Multiply column (FHE multiplication)
+    MulUpdate mul = 3;
+  }
+}
+
+message SetUpdate {
+  ColumnRef column = 1;
+  CipherBlob value = 2;
+}
+
+message AddUpdate {
+  ColumnRef column = 1;
+  CipherBlob value = 2;
+}
+
+message MulUpdate {
+  ColumnRef column = 1;
+  CipherBlob value = 2;
+}

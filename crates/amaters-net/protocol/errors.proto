@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package amaters.errors;
+
+// Error response
+message ErrorResponse {
+  // Error code
+  ErrorCode code = 1;
+
+  // Human-readable error message
+  string message = 2;
+
+  // Optional detailed error context
+  optional string details = 3;
+
+  // Optional retry-after hint (seconds)
+  optional uint32 retry_after = 4;
+
+  // Error category for client handling
+  ErrorCategory category = 5;
+}
+
+// Error codes
+enum ErrorCode {
+  // Unknown error
+  ERROR_UNKNOWN = 0;
+
+  // Network errors
+  ERROR_NETWORK_TIMEOUT = 1000;
+  ERROR_NETWORK_CONNECTION_REFUSED = 1001;
+  ERROR_NETWORK_CONNECTION_RESET = 1002;
+  ERROR_NETWORK_DNS_FAILED = 1003;
+  ERROR_NETWORK_TLS_HANDSHAKE = 1004;
+
+  // Protocol errors
+  ERROR_PROTOCOL_INVALID_REQUEST = 2000;
+  ERROR_PROTOCOL_UNSUPPORTED_VERSION = 2001;
+  ERROR_PROTOCOL_MALFORMED_MESSAGE = 2002;
+  ERROR_PROTOCOL_MISSING_FIELD = 2003;
+
+  // Authentication/Authorization errors
+  ERROR_AUTH_FAILED = 3000;
+  ERROR_AUTH_EXPIRED = 3001;
+  ERROR_AUTH_INSUFFICIENT_PERMISSIONS = 3002;
+  ERROR_AUTH_INVALID_CERTIFICATE = 3003;
+
+  // Storage errors
+  ERROR_STORAGE_NOT_FOUND = 4000;
+  ERROR_STORAGE_ALREADY_EXISTS = 4001;
+  ERROR_STORAGE_CORRUPTED = 4002;
+  ERROR_STORAGE_FULL = 4003;
+  ERROR_STORAGE_IO = 4004;
+
+  // Compute errors (FHE)
+  ERROR_COMPUTE_FAILED = 5000;
+  ERROR_COMPUTE_INVALID_OPERATION = 5001;
+  ERROR_COMPUTE_TIMEOUT = 5002;
+
+  // Validation errors
+  ERROR_VALIDATION_INVALID_KEY = 6000;
+  ERROR_VALIDATION_INVALID_VALUE = 6001;
+  ERROR_VALIDATION_SIZE_EXCEEDED = 6002;
+  ERROR_VALIDATION_INVALID_COLLECTION = 6003;
+
+  // Server errors
+  ERROR_SERVER_INTERNAL = 7000;
+  ERROR_SERVER_UNAVAILABLE = 7001;
+  ERROR_SERVER_OVERLOADED = 7002;
+  ERROR_SERVER_SHUTTING_DOWN = 7003;
+}
+
+// Error category for client-side handling
+enum ErrorCategory {
+  // Unknown category
+  CATEGORY_UNKNOWN = 0;
+
+  // Retryable errors (client should retry)
+  CATEGORY_RETRYABLE = 1;
+
+  // Non-retryable errors (client should not retry)
+  CATEGORY_NON_RETRYABLE = 2;
+
+  // Authentication errors (client should re-authenticate)
+  CATEGORY_AUTH = 3;
+
+  // Client errors (invalid request)
+  CATEGORY_CLIENT_ERROR = 4;
+
+  // Server errors (server-side issue)
+  CATEGORY_SERVER_ERROR = 5;
+}

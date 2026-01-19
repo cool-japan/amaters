@@ -1,0 +1,90 @@
+{
+  "name": "@amaters/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for AmateRS - Fully Homomorphic Encrypted Database",
+  "main": "dist/node/index.js",
+  "module": "dist/web/index.js",
+  "browser": "dist/web/index.js",
+  "types": "dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "node": {
+        "import": "./dist/node/index.js",
+        "require": "./dist/node/index.cjs",
+        "types": "./dist/types/index.d.ts"
+      },
+      "browser": {
+        "import": "./dist/web/index.js",
+        "types": "./dist/types/index.d.ts"
+      },
+      "default": {
+        "import": "./dist/web/index.js",
+        "types": "./dist/types/index.d.ts"
+      }
+    },
+    "./node": {
+      "import": "./dist/node/index.js",
+      "require": "./dist/node/index.cjs",
+      "types": "./dist/types/index.d.ts"
+    },
+    "./web": {
+      "import": "./dist/web/index.js",
+      "types": "./dist/types/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "npm run build:wasm && npm run build:js",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg/web && wasm-pack build --target nodejs --out-dir pkg/node",
+    "build:js": "npm run build:js:web && npm run build:js:node && npm run build:types",
+    "build:js:web": "tsc -p tsconfig.web.json",
+    "build:js:node": "tsc -p tsconfig.node.json",
+    "build:types": "tsc -p tsconfig.types.json --emitDeclarationOnly",
+    "clean": "rm -rf dist pkg",
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "npm run test:node && npm run test:web",
+    "test:node": "node --test tests/*.test.js",
+    "test:web": "wasm-pack test --headless --chrome",
+    "lint": "eslint src/ --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\" \"examples/**/*.ts\""
+  },
+  "keywords": [
+    "amaters",
+    "fhe",
+    "fully-homomorphic-encryption",
+    "database",
+    "wasm",
+    "typescript",
+    "encrypted-database",
+    "privacy",
+    "cryptography"
+  ],
+  "author": "COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cool-japan/amaters.git",
+    "directory": "crates/amaters-sdk-typescript"
+  },
+  "homepage": "https://github.com/cool-japan/amaters#readme",
+  "bugs": {
+    "url": "https://github.com/cool-japan/amaters/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "eslint": "^8.55.0",
+    "@typescript-eslint/eslint-plugin": "^6.14.0",
+    "@typescript-eslint/parser": "^6.14.0",
+    "prettier": "^3.1.0"
+  },
+  "peerDependencies": {},
+  "sideEffects": false
+}

@@ -1,0 +1,176 @@
+syntax = "proto3";
+
+package amaters.aql;
+
+import "types.proto";
+import "query.proto";
+import "errors.proto";
+
+// AmateRS Query Language (AQL) Service
+service AqlService {
+  // Execute a single query
+  rpc ExecuteQuery(QueryRequest) returns (QueryResponse);
+
+  // Execute a batch of queries (transaction)
+  rpc ExecuteBatch(BatchRequest) returns (BatchResponse);
+
+  // Execute a streaming query (for large result sets)
+  rpc ExecuteStream(QueryRequest) returns (stream StreamResponse);
+
+  // Bidirectional streaming for interactive queries
+  rpc ExecuteInteractive(stream QueryRequest) returns (stream QueryResponse);
+
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Get server information
+  rpc GetServerInfo(ServerInfoRequest) returns (ServerInfoResponse);
+}
+
+// Query request
+message QueryRequest {
+  // Query to execute
+  amaters.query.Query query = 1;
+
+  // Optional request ID for tracking
+  optional string request_id = 2;
+
+  // Optional timeout (milliseconds)
+  optional uint32 timeout_ms = 3;
+
+  // Optional transaction ID
+  optional string transaction_id = 4;
+
+  // Protocol version
+  amaters.types.Version version = 5;
+}
+
+// Query response
+message QueryResponse {
+  // Result or error
+  oneof response {
+    // Successful result
+    amaters.query.QueryResult result = 1;
+    // Error response
+    amaters.errors.ErrorResponse error = 2;
+  }
+
+  // Request ID (echoed from request)
+  optional string request_id = 3;
+
+  // Execution time (milliseconds)
+  uint64 execution_time_ms = 4;
+}
+
+// Batch request (transaction)
+message BatchRequest {
+  // Queries to execute
+  repeated amaters.query.Query queries = 1;
+
+  // Optional request ID
+  optional string request_id = 2;
+
+  // Optional timeout (milliseconds)
+  optional uint32 timeout_ms = 3;
+
+  // Transaction isolation level
+  IsolationLevel isolation_level = 4;
+
+  // Protocol version
+  amaters.types.Version version = 5;
+}
+
+// Batch response
+message BatchResponse {
+  // Results or error
+  oneof response {
+    // Successful results
+    BatchResult results = 1;
+    // Error response (all queries rolled back)
+    amaters.errors.ErrorResponse error = 2;
+  }
+
+  // Request ID (echoed from request)
+  optional string request_id = 3;
+
+  // Total execution time (milliseconds)
+  uint64 execution_time_ms = 4;
+}
+
+// Batch result
+message BatchResult {
+  // Results for each query
+  repeated amaters.query.QueryResult results = 1;
+}
+
+// Stream response (for large result sets)
+message StreamResponse {
+  // Chunk of results
+  oneof chunk {
+    // Key-value pair
+    amaters.query.KeyValue value = 1;
+    // Error response
+    amaters.errors.ErrorResponse error = 2;
+    // End of stream marker
+    StreamEnd end = 3;
+  }
+
+  // Sequence number for ordering
+  uint64 sequence = 4;
+}
+
+// End of stream marker
+message StreamEnd {
+  // Total number of results
+  uint64 total_count = 1;
+}
+
+// Health check request
+message HealthCheckRequest {
+  // Optional service name to check
+  optional string service = 1;
+}
+
+// Health check response
+message HealthCheckResponse {
+  // Health status
+  HealthStatus status = 1;
+
+  // Optional status message
+  optional string message = 2;
+}
+
+// Health status
+enum HealthStatus {
+  HEALTH_UNKNOWN = 0;
+  HEALTH_SERVING = 1;
+  HEALTH_NOT_SERVING = 2;
+  HEALTH_SERVICE_UNKNOWN = 3;
+}
+
+// Server info request
+message ServerInfoRequest {}
+
+// Server info response
+message ServerInfoResponse {
+  // Server version
+  amaters.types.Version version = 1;
+
+  // Supported protocol versions
+  repeated amaters.types.Version supported_versions = 2;
+
+  // Server capabilities
+  repeated string capabilities = 3;
+
+  // Server uptime (seconds)
+  uint64 uptime_seconds = 4;
+}
+
+// Transaction isolation level
+enum IsolationLevel {
+  ISOLATION_DEFAULT = 0;
+  ISOLATION_READ_UNCOMMITTED = 1;
+  ISOLATION_READ_COMMITTED = 2;
+  ISOLATION_REPEATABLE_READ = 3;
+  ISOLATION_SERIALIZABLE = 4;
+}

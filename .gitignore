@@ -1,0 +1,30 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+**/Cargo.lock  # For libraries
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+/test-data/
+*.profraw
+
+# Documentation
+/book/
+
+# Local development
+/local/
+*.log
+.env
+
+# Claude
+**/CLAUDE.md
+**/.claude/

@@ -1,0 +1,46 @@
+[package]
+name = "amaters-sdk-rust"
+description = "Rust SDK for AmateRS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["sdk", "client", "database"]
+categories = ["api-bindings", "database"]
+
+[dependencies]
+amaters-core = { workspace = true }
+amaters-net = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+uuid = { workspace = true }
+tfhe = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+oxicode = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[features]
+default = []
+fhe = ["tfhe"]
+serialization = ["serde", "oxicode"]
+
+[lints]
+workspace = true

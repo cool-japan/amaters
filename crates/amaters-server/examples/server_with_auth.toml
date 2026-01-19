@@ -1,0 +1,90 @@
+# Example AmateRS Server configuration with authentication and authorization enabled
+
+[server]
+bind_address = "0.0.0.0:7878"
+data_dir = "./data"
+pid_file = "/var/run/amaters-server.pid"
+max_connections = 1000
+shutdown_timeout_secs = 30
+
+[storage]
+engine = "lsm"
+memtable_size_mb = 64
+block_cache_size_mb = 256
+
+[storage.wal]
+enabled = true
+dir = "wal"
+segment_size_mb = 64
+sync_mode = "interval"
+
+[storage.compaction]
+strategy = "leveled"
+num_levels = 7
+level_multiplier = 10
+max_concurrent = 4
+
+[network]
+tls_enabled = true
+tls_cert = "/etc/amaters/certs/server.crt"
+tls_key = "/etc/amaters/certs/server.key"
+tls_ca = "/etc/amaters/certs/ca.crt"
+require_client_cert = true
+connection_timeout_secs = 30
+keepalive_interval_secs = 60
+
+[logging]
+level = "info"
+format = "json"
+file_enabled = true
+file_path = "/var/log/amaters/server.log"
+
+[logging.rotation]
+enabled = true
+max_size_mb = 100
+max_backups = 10
+
+[metrics]
+enabled = true
+bind_address = "127.0.0.1:9090"
+export_interval_secs = 60
+
+# Authentication configuration
+[auth]
+enabled = true
+methods = ["mtls", "jwt", "api_key"]
+reject_unauthenticated = true
+
+# mTLS authentication
+[auth.mtls]
+enabled = true
+ca_certs_dir = "/etc/amaters/certs/trusted_cas"
+crl_path = "/etc/amaters/certs/crl.pem"
+verify_cn = true
+allowed_organizations = ["COOLJAPAN OU", "Trusted Partner Inc"]
+
+# JWT authentication
+[auth.jwt]
+enabled = true
+secret = "your-secret-key-change-this-in-production"
+algorithm = "HS256"
+expiration_secs = 3600
+issuer = "amaters-server"
+audience = "amaters-clients"
+
+# API key authentication
+[auth.api_key]
+enabled = true
+keys_file = "/etc/amaters/api_keys.json"
+header_name = "X-API-Key"
+hash_keys = true
+
+# Authorization configuration
+[authz]
+enabled = true
+default_role = "user"
+roles_file = "/etc/amaters/roles.toml"
+collection_permissions = true
+default_mode = "deny-by-default"
+audit_enabled = true
+audit_log_path = "/var/log/amaters/audit.jsonl"
