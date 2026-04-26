@@ -106,10 +106,12 @@ message MultiResult {
   repeated KeyValue values = 2;
 }
 
-// Key-value pair
+// Key-value pair with optional FHE predicate evaluation result
 message KeyValue {
   amaters.types.Key key = 1;
   amaters.types.CipherBlob value = 2;
+  // FHE encrypted boolean result from predicate evaluation (present in filter queries)
+  optional bytes encrypted_predicate_result = 4;
 }
 
 // Success result (for operations that don't return data)

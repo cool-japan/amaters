@@ -79,4 +79,4 @@ Build Status: ✅ Clean compilation (all crates, 0 warnings)
 
 **Report Generated**: 2026-01-18
 **Maintained By**: COOLJAPAN OU (Team KitaSan)
-**License**: MIT OR Apache-2.0
+**License**: Apache-2.0

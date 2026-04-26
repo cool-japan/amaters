@@ -57,6 +57,25 @@ pub enum RaftError {
         /// Timeout description
         description: String,
     },
+    /// A membership change is already in progress (joint consensus active)
+    MembershipChangeInProgress,
+    /// The target node is already a member of the cluster
+    NodeAlreadyMember {
+        /// The node ID that is already a member
+        node_id: u64,
+    },
+    /// The target node is not a member of the cluster
+    NodeNotMember {
+        /// The node ID that was not found
+        node_id: u64,
+    },
+    /// State machine application error
+    StateMachineError {
+        /// Error message
+        message: String,
+    },
+    /// Node is currently replaying its WAL on startup and cannot serve requests
+    Recovering,
     /// Generic error
     Other {
         /// Error message
@@ -97,6 +116,27 @@ impl fmt::Display for RaftError {
             }
             RaftError::Timeout { description } => {
                 write!(f, "Timeout: {}", description)
+            }
+            RaftError::MembershipChangeInProgress => {
+                write!(
+                    f,
+                    "A membership change is already in progress (joint consensus active)"
+                )
+            }
+            RaftError::NodeAlreadyMember { node_id } => {
+                write!(f, "Node {} is already a member of the cluster", node_id)
+            }
+            RaftError::NodeNotMember { node_id } => {
+                write!(f, "Node {} is not a member of the cluster", node_id)
+            }
+            RaftError::StateMachineError { message } => {
+                write!(f, "State machine error: {}", message)
+            }
+            RaftError::Recovering => {
+                write!(
+                    f,
+                    "Node is replaying WAL on startup and cannot serve requests"
+                )
             }
             RaftError::Other { message } => {
                 write!(f, "Error: {}", message)

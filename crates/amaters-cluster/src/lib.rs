@@ -26,22 +26,41 @@
 //! let index = node.propose(cmd)?;
 //! ```
 
+pub mod encryption;
 pub mod error;
+pub mod failover;
+pub mod heartbeat;
 pub mod log;
+pub mod metrics;
 pub mod node;
+pub mod persistence;
 pub mod rpc;
+pub mod snapshot;
 pub mod state;
 pub mod types;
-
+pub mod wal;
 // Re-exports for convenience
+pub use encryption::{EncryptedPayload, EntryEncryptor, LogEncryptionKey, LogIntegrityVerifier};
 pub use error::{RaftError, RaftResult};
-pub use log::{Command, LogEntry, RaftLog};
+pub use failover::{FailoverConfig, FailoverCoordinator, FailoverEvent};
+pub use heartbeat::FailureDetector;
+pub use log::{ApplyResult, Command, LogEntry, RaftLog, SnapshotData, StateMachine};
+pub use metrics::ClusterMetrics;
 pub use node::RaftNode;
+pub use persistence::{FilePersistence, MemoryPersistence, RaftPersistence};
 pub use rpc::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
-pub use state::{CandidateState, LeaderState, PersistentState, VolatileState};
-pub use types::{LogIndex, NodeId, NodeState, RaftConfig, Term};
+pub use snapshot::{
+    DiskSnapshotStore, InstallSnapshotRequest, InstallSnapshotResponse, Snapshot, SnapshotConfig,
+    SnapshotManager, SnapshotMetadata, SnapshotPolicy, SnapshotReceiver, SnapshotStore,
+};
+pub use state::{CandidateState, FencingTokenState, LeaderState, PersistentState, VolatileState};
+pub use types::{
+    ClusterConfig, ConfigState, FailureEvent, FencingToken, HeartbeatConfig, LogIndex,
+    MembershipChange, NodeId, NodeState, RaftConfig, Term,
+};
+pub use wal::{CorruptionPolicy, SyncMode, WalDiagnostics, WalReader, WalWriter};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

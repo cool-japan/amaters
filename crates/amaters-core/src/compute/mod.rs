@@ -36,10 +36,13 @@
 //! ```
 
 pub mod circuit;
+pub mod gpu;
 pub mod key_manager;
 pub mod keys;
 pub mod operations;
 pub mod optimizer;
+pub mod plan_cache;
+pub mod planner;
 pub mod predicate;
 
 #[cfg(test)]
@@ -48,12 +51,15 @@ mod filter_tests;
 // Re-export commonly used types
 pub use circuit::{
     BinaryOperator, Circuit, CircuitBuilder, CircuitNode, CircuitValue, CompareOperator,
-    EncryptedType, UnaryOperator,
+    ConstantType, EncryptedType, UnaryOperator, count_encrypted_constants,
+    count_plaintext_constants, decrypt_constant, encrypt_circuit_constants, encrypt_constant,
+    is_encrypted_constant,
 };
 pub use key_manager::{ClientId, KeyManager};
 pub use keys::{FheKeyPair, InMemoryKeyStorage, KeyStorage};
 pub use operations::{EncryptedBool, EncryptedU8, EncryptedU16, EncryptedU32, EncryptedU64};
 pub use optimizer::{CircuitOptimizer, DependencyGraph, NodeId, OptimizationStats};
+pub use planner::{LogicalPlan, PhysicalPlan, PlanCost, PlannerStats, QueryPlanner};
 pub use predicate::{PredicateCompiler, compile_predicate};
 
 use crate::error::{AmateRSError, ErrorContext, Result};
@@ -209,10 +215,41 @@ impl FheExecutor {
             }
 
             CircuitNode::Constant(_value) => {
-                // TODO: Support encrypted constants
+                // Plaintext constants in FHE context are not directly supported.
+                // Use encrypt_circuit_constants() to pre-process the circuit before
+                // execution, converting all Constant nodes to EncryptedConstant.
                 Err(AmateRSError::FheComputation(ErrorContext::new(
-                    "Encrypted constants not yet supported".to_string(),
+                    "Plaintext constants cannot be used in FHE execution. \
+                     Use encrypt_circuit_constants() to encrypt constants before evaluation."
+                        .to_string(),
                 )))
+            }
+
+            CircuitNode::EncryptedConstant {
+                data,
+                original_type,
+            } => {
+                // Encrypted constants are already in ciphertext form.
+                // Deserialize the CipherBlob from the encrypted data and
+                // convert to the appropriate EncryptedValue based on original_type.
+                let blob = CipherBlob::new(data.clone());
+                match original_type {
+                    ConstantType::Boolean => Ok(EncryptedValue::Bool(
+                        EncryptedBool::from_cipher_blob(&blob)?,
+                    )),
+                    ConstantType::Integer => {
+                        // Try to deserialize as the most common integer type (U64)
+                        // In practice, the caller should ensure the encrypted data
+                        // matches the expected type from the circuit context.
+                        Ok(EncryptedValue::U64(EncryptedU64::from_cipher_blob(&blob)?))
+                    }
+                    ConstantType::Float | ConstantType::Bytes => {
+                        Err(AmateRSError::FheComputation(ErrorContext::new(format!(
+                            "EncryptedConstant of type {} is not directly evaluable in FHE circuits",
+                            original_type
+                        ))))
+                    }
+                }
             }
 
             CircuitNode::BinaryOp { op, left, right } => {

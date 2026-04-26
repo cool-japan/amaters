@@ -381,11 +381,28 @@ struct JwtValidator {
     validation: Validation,
 }
 
+impl std::fmt::Debug for JwtValidator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtValidator")
+            .field("config", &self.config)
+            .field("decoding_key", &"<redacted>")
+            .field("validation", &"<validation>")
+            .finish()
+    }
+}
+
 impl JwtValidator {
     fn new(config: JwtSettings) -> AuthResult<Self> {
         let algorithm = match config.algorithm.as_str() {
             "HS256" => Algorithm::HS256,
+            "HS384" => Algorithm::HS384,
+            "HS512" => Algorithm::HS512,
             "RS256" => Algorithm::RS256,
+            "RS384" => Algorithm::RS384,
+            "RS512" => Algorithm::RS512,
+            "ES256" => Algorithm::ES256,
+            "ES384" => Algorithm::ES384,
+            "EdDSA" => Algorithm::EdDSA,
             _ => {
                 return Err(AuthError::ConfigError(format!(
                     "Unsupported JWT algorithm: {}",
@@ -395,19 +412,37 @@ impl JwtValidator {
         };
 
         let decoding_key = match algorithm {
-            Algorithm::HS256 => {
+            Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
                 let secret = config.secret.as_ref().ok_or_else(|| {
                     AuthError::ConfigError("JWT secret not configured".to_string())
                 })?;
                 DecodingKey::from_secret(secret.as_bytes())
             }
-            Algorithm::RS256 => {
+            Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => {
                 let public_key_path = config.public_key_path.as_ref().ok_or_else(|| {
-                    AuthError::ConfigError("JWT public key path not configured".to_string())
+                    AuthError::ConfigError("JWT RSA public key path not configured".to_string())
                 })?;
                 let pem = fs::read_to_string(public_key_path)?;
                 DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|e| {
                     AuthError::ConfigError(format!("Failed to load RSA public key: {}", e))
+                })?
+            }
+            Algorithm::ES256 | Algorithm::ES384 => {
+                let ec_key_path = config.ec_public_key_path.as_ref().ok_or_else(|| {
+                    AuthError::ConfigError("JWT EC public key path not configured".to_string())
+                })?;
+                let pem = fs::read_to_string(ec_key_path)?;
+                DecodingKey::from_ec_pem(pem.as_bytes()).map_err(|e| {
+                    AuthError::ConfigError(format!("Failed to load EC public key: {}", e))
+                })?
+            }
+            Algorithm::EdDSA => {
+                let ed_key_path = config.ed_public_key_path.as_ref().ok_or_else(|| {
+                    AuthError::ConfigError("JWT Ed25519 public key path not configured".to_string())
+                })?;
+                let pem = fs::read_to_string(ed_key_path)?;
+                DecodingKey::from_ed_pem(pem.as_bytes()).map_err(|e| {
+                    AuthError::ConfigError(format!("Failed to load Ed25519 public key: {}", e))
                 })?
             }
             _ => {
@@ -564,7 +599,102 @@ impl ApiKeyValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{EncodingKey, Header, encode};
     use std::env;
+    use std::io::Write;
+
+    /// Helper: create a JwtSettings for HMAC-based algorithms
+    fn hmac_jwt_settings(algorithm: &str, secret: &str) -> JwtSettings {
+        JwtSettings {
+            enabled: true,
+            secret: Some(secret.to_string()),
+            public_key_path: None,
+            ec_public_key_path: None,
+            ed_public_key_path: None,
+            algorithm: algorithm.to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        }
+    }
+
+    /// Helper: create JWT claims with expiration in the future
+    fn make_claims(sub: &str) -> JwtClaims {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_secs() as usize;
+        JwtClaims {
+            sub: sub.to_string(),
+            exp: now + 3600,
+            iat: Some(now),
+            iss: None,
+            aud: None,
+            name: Some(format!("User {}", sub)),
+            roles: Some(vec!["admin".to_string()]),
+            attributes: HashMap::new(),
+        }
+    }
+
+    /// Helper: create expired JWT claims
+    fn make_expired_claims(sub: &str) -> JwtClaims {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_secs() as usize;
+        JwtClaims {
+            sub: sub.to_string(),
+            exp: now.saturating_sub(3600), // expired 1 hour ago
+            iat: Some(now.saturating_sub(7200)),
+            iss: None,
+            aud: None,
+            name: Some(format!("User {}", sub)),
+            roles: None,
+            attributes: HashMap::new(),
+        }
+    }
+
+    /// Helper: write content to a temporary file and return the path
+    fn write_temp_key(name: &str, content: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("amaters_jwt_test");
+        std::fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).expect("failed to create temp file");
+        file.write_all(content).expect("failed to write temp file");
+        path
+    }
+
+    /// Generate RSA key pair PEM bytes (private, public) using openssl-like approach
+    /// We use the jsonwebtoken crate's own key parsing to ensure compatibility.
+    /// These are pre-generated 2048-bit RSA test keys.
+    fn rsa_test_keys() -> (&'static [u8], &'static [u8]) {
+        // Pre-generated 2048-bit RSA key pair for testing
+        (
+            include_bytes!("../tests/fixtures/rsa_private.pem"),
+            include_bytes!("../tests/fixtures/rsa_public.pem"),
+        )
+    }
+
+    fn ec256_test_keys() -> (&'static [u8], &'static [u8]) {
+        (
+            include_bytes!("../tests/fixtures/ec256_private.pem"),
+            include_bytes!("../tests/fixtures/ec256_public.pem"),
+        )
+    }
+
+    fn ec384_test_keys() -> (&'static [u8], &'static [u8]) {
+        (
+            include_bytes!("../tests/fixtures/ec384_private.pem"),
+            include_bytes!("../tests/fixtures/ec384_public.pem"),
+        )
+    }
+
+    fn ed25519_test_keys() -> (&'static [u8], &'static [u8]) {
+        (
+            include_bytes!("../tests/fixtures/ed25519_private.pem"),
+            include_bytes!("../tests/fixtures/ed25519_public.pem"),
+        )
+    }
 
     #[test]
     fn test_principal_creation() {
@@ -631,6 +761,8 @@ mod tests {
             enabled: true,
             secret: None,
             public_key_path: None,
+            ec_public_key_path: None,
+            ed_public_key_path: None,
             algorithm: "HS256".to_string(),
             expiration_secs: 3600,
             issuer: None,
@@ -646,5 +778,343 @@ mod tests {
         assert_eq!(format!("{}", AuthMethod::MutualTls), "mTLS");
         assert_eq!(format!("{}", AuthMethod::Jwt), "JWT");
         assert_eq!(format!("{}", AuthMethod::ApiKey), "API Key");
+    }
+
+    // ---- JWT algorithm validation tests ----
+
+    #[test]
+    fn test_jwt_hs256_validation() {
+        let secret = "super-secret-key-for-hs256-testing";
+        let config = hmac_jwt_settings("HS256", secret);
+        let validator = JwtValidator::new(config).expect("HS256 validator creation failed");
+
+        let claims = make_claims("user-hs256");
+        let header = Header::new(Algorithm::HS256);
+        let encoding_key = EncodingKey::from_secret(secret.as_bytes());
+        let token = encode(&header, &claims, &encoding_key).expect("HS256 token encoding failed");
+
+        let principal = validator
+            .validate_token(&token)
+            .expect("HS256 token validation failed");
+        assert_eq!(principal.id, "user-hs256");
+        assert_eq!(principal.auth_method, AuthMethod::Jwt);
+    }
+
+    #[test]
+    fn test_jwt_rs256_validation() {
+        let (private_pem, public_pem) = rsa_test_keys();
+        let pub_path = write_temp_key("rs256_pub.pem", public_pem);
+
+        let config = JwtSettings {
+            enabled: true,
+            secret: None,
+            public_key_path: Some(pub_path),
+            ec_public_key_path: None,
+            ed_public_key_path: None,
+            algorithm: "RS256".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+        let validator = JwtValidator::new(config).expect("RS256 validator creation failed");
+
+        let claims = make_claims("user-rs256");
+        let header = Header::new(Algorithm::RS256);
+        let encoding_key =
+            EncodingKey::from_rsa_pem(private_pem).expect("RS256 encoding key creation failed");
+        let token = encode(&header, &claims, &encoding_key).expect("RS256 token encoding failed");
+
+        let principal = validator
+            .validate_token(&token)
+            .expect("RS256 token validation failed");
+        assert_eq!(principal.id, "user-rs256");
+    }
+
+    #[test]
+    fn test_jwt_rs384_validation() {
+        let (private_pem, public_pem) = rsa_test_keys();
+        let pub_path = write_temp_key("rs384_pub.pem", public_pem);
+
+        let config = JwtSettings {
+            enabled: true,
+            secret: None,
+            public_key_path: Some(pub_path),
+            ec_public_key_path: None,
+            ed_public_key_path: None,
+            algorithm: "RS384".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+        let validator = JwtValidator::new(config).expect("RS384 validator creation failed");
+
+        let claims = make_claims("user-rs384");
+        let header = Header::new(Algorithm::RS384);
+        let encoding_key =
+            EncodingKey::from_rsa_pem(private_pem).expect("RS384 encoding key creation failed");
+        let token = encode(&header, &claims, &encoding_key).expect("RS384 token encoding failed");
+
+        let principal = validator
+            .validate_token(&token)
+            .expect("RS384 token validation failed");
+        assert_eq!(principal.id, "user-rs384");
+    }
+
+    #[test]
+    fn test_jwt_rs512_validation() {
+        let (private_pem, public_pem) = rsa_test_keys();
+        let pub_path = write_temp_key("rs512_pub.pem", public_pem);
+
+        let config = JwtSettings {
+            enabled: true,
+            secret: None,
+            public_key_path: Some(pub_path),
+            ec_public_key_path: None,
+            ed_public_key_path: None,
+            algorithm: "RS512".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+        let validator = JwtValidator::new(config).expect("RS512 validator creation failed");
+
+        let claims = make_claims("user-rs512");
+        let header = Header::new(Algorithm::RS512);
+        let encoding_key =
+            EncodingKey::from_rsa_pem(private_pem).expect("RS512 encoding key creation failed");
+        let token = encode(&header, &claims, &encoding_key).expect("RS512 token encoding failed");
+
+        let principal = validator
+            .validate_token(&token)
+            .expect("RS512 token validation failed");
+        assert_eq!(principal.id, "user-rs512");
+    }
+
+    #[test]
+    fn test_jwt_es256_validation() {
+        let (private_pem, public_pem) = ec256_test_keys();
+        let pub_path = write_temp_key("es256_pub.pem", public_pem);
+
+        let config = JwtSettings {
+            enabled: true,
+            secret: None,
+            public_key_path: None,
+            ec_public_key_path: Some(pub_path),
+            ed_public_key_path: None,
+            algorithm: "ES256".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+        let validator = JwtValidator::new(config).expect("ES256 validator creation failed");
+
+        let claims = make_claims("user-es256");
+        let header = Header::new(Algorithm::ES256);
+        let encoding_key =
+            EncodingKey::from_ec_pem(private_pem).expect("ES256 encoding key creation failed");
+        let token = encode(&header, &claims, &encoding_key).expect("ES256 token encoding failed");
+
+        let principal = validator
+            .validate_token(&token)
+            .expect("ES256 token validation failed");
+        assert_eq!(principal.id, "user-es256");
+    }
+
+    #[test]
+    fn test_jwt_es384_validation() {
+        let (private_pem, public_pem) = ec384_test_keys();
+        let pub_path = write_temp_key("es384_pub.pem", public_pem);
+
+        let config = JwtSettings {
+            enabled: true,
+            secret: None,
+            public_key_path: None,
+            ec_public_key_path: Some(pub_path),
+            ed_public_key_path: None,
+            algorithm: "ES384".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+        let validator = JwtValidator::new(config).expect("ES384 validator creation failed");
+
+        let claims = make_claims("user-es384");
+        let header = Header::new(Algorithm::ES384);
+        let encoding_key =
+            EncodingKey::from_ec_pem(private_pem).expect("ES384 encoding key creation failed");
+        let token = encode(&header, &claims, &encoding_key).expect("ES384 token encoding failed");
+
+        let principal = validator
+            .validate_token(&token)
+            .expect("ES384 token validation failed");
+        assert_eq!(principal.id, "user-es384");
+    }
+
+    #[test]
+    fn test_jwt_eddsa_validation() {
+        let (private_pem, public_pem) = ed25519_test_keys();
+        let pub_path = write_temp_key("eddsa_pub.pem", public_pem);
+
+        let config = JwtSettings {
+            enabled: true,
+            secret: None,
+            public_key_path: None,
+            ec_public_key_path: None,
+            ed_public_key_path: Some(pub_path),
+            algorithm: "EdDSA".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+        let validator = JwtValidator::new(config).expect("EdDSA validator creation failed");
+
+        let claims = make_claims("user-eddsa");
+        let header = Header::new(Algorithm::EdDSA);
+        let encoding_key =
+            EncodingKey::from_ed_pem(private_pem).expect("EdDSA encoding key creation failed");
+        let token = encode(&header, &claims, &encoding_key).expect("EdDSA token encoding failed");
+
+        let principal = validator
+            .validate_token(&token)
+            .expect("EdDSA token validation failed");
+        assert_eq!(principal.id, "user-eddsa");
+    }
+
+    #[test]
+    fn test_jwt_algorithm_mismatch() {
+        // Create an RS256 token but try to validate with HS256
+        let secret = "test-mismatch-secret";
+        let config = hmac_jwt_settings("HS256", secret);
+        let validator = JwtValidator::new(config).expect("HS256 validator creation failed");
+
+        let (private_pem, _) = rsa_test_keys();
+        let claims = make_claims("user-mismatch");
+        let header = Header::new(Algorithm::RS256);
+        let encoding_key =
+            EncodingKey::from_rsa_pem(private_pem).expect("RS256 encoding key creation failed");
+        let token = encode(&header, &claims, &encoding_key).expect("RS256 token encoding failed");
+
+        let result = validator.validate_token(&token);
+        assert!(result.is_err(), "Algorithm mismatch should fail validation");
+    }
+
+    #[test]
+    fn test_jwt_missing_ec_key_path() {
+        let config = JwtSettings {
+            enabled: true,
+            secret: None,
+            public_key_path: None,
+            ec_public_key_path: None, // Not configured
+            ed_public_key_path: None,
+            algorithm: "ES256".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+
+        let result = JwtValidator::new(config);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.expect_err("should be an error"));
+        assert!(
+            err_msg.contains("EC public key path not configured"),
+            "Expected EC key path error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_jwt_missing_ed_key_path() {
+        let config = JwtSettings {
+            enabled: true,
+            secret: None,
+            public_key_path: None,
+            ec_public_key_path: None,
+            ed_public_key_path: None, // Not configured
+            algorithm: "EdDSA".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+
+        let result = JwtValidator::new(config);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.expect_err("should be an error"));
+        assert!(
+            err_msg.contains("Ed25519 public key path not configured"),
+            "Expected Ed25519 key path error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_jwt_invalid_ec_key() {
+        // Write corrupt PEM content
+        let corrupt_path = write_temp_key("corrupt_ec.pem", b"NOT A VALID PEM KEY");
+
+        let config = JwtSettings {
+            enabled: true,
+            secret: None,
+            public_key_path: None,
+            ec_public_key_path: Some(corrupt_path),
+            ed_public_key_path: None,
+            algorithm: "ES256".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+
+        let result = JwtValidator::new(config);
+        assert!(result.is_err(), "Corrupt EC key should fail");
+        let err_msg = format!("{}", result.expect_err("should be an error"));
+        assert!(
+            err_msg.contains("Failed to load EC public key"),
+            "Expected EC key load error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_jwt_expired_token() {
+        let secret = "expiration-test-secret";
+        let config = hmac_jwt_settings("HS256", secret);
+        let validator = JwtValidator::new(config).expect("HS256 validator creation failed");
+
+        let claims = make_expired_claims("user-expired");
+        let header = Header::new(Algorithm::HS256);
+        let encoding_key = EncodingKey::from_secret(secret.as_bytes());
+        let token = encode(&header, &claims, &encoding_key).expect("Expired token encoding failed");
+
+        let result = validator.validate_token(&token);
+        assert!(result.is_err(), "Expired token should fail validation");
+        let err_msg = format!("{}", result.expect_err("should be an error"));
+        assert!(
+            err_msg.contains("Token validation failed"),
+            "Expected token validation error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_jwt_unsupported_algorithm() {
+        let config = JwtSettings {
+            enabled: true,
+            secret: Some("secret".to_string()),
+            public_key_path: None,
+            ec_public_key_path: None,
+            ed_public_key_path: None,
+            algorithm: "UNSUPPORTED".to_string(),
+            expiration_secs: 3600,
+            issuer: None,
+            audience: None,
+        };
+
+        let result = JwtValidator::new(config);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.expect_err("should be an error"));
+        assert!(
+            err_msg.contains("Unsupported JWT algorithm"),
+            "Expected unsupported algorithm error, got: {}",
+            err_msg
+        );
     }
 }

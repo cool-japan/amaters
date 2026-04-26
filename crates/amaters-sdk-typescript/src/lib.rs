@@ -39,6 +39,7 @@
 mod client;
 mod error;
 mod query;
+mod transport;
 mod types;
 
 use wasm_bindgen::prelude::*;
@@ -46,6 +47,7 @@ use wasm_bindgen::prelude::*;
 pub use client::*;
 pub use error::*;
 pub use query::*;
+pub use transport::*;
 pub use types::*;
 
 /// Initialize the WASM module

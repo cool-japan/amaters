@@ -753,7 +753,7 @@ impl LsmTree {
     pub fn stats(&self) -> LsmTreeStats {
         let levels = self.levels.read();
         let cache_stats = self.block_cache.stats();
-        let compaction_stats = self.compaction_executor.read().stats().clone();
+        let compaction_stats = self.compaction_executor.read().stats_snapshot();
 
         LsmTreeStats {
             memtable_size: self.memtable.size_bytes(),
@@ -891,7 +891,7 @@ pub struct LsmTreeStats {
     /// Block cache size in bytes
     pub cache_size: usize,
     /// Compaction statistics
-    pub compaction_stats: crate::storage::CompactionStats,
+    pub compaction_stats: crate::storage::CompactionStatsSnapshot,
 }
 
 #[cfg(test)]
@@ -1029,7 +1029,8 @@ mod tests {
         // Check stats
         let stats = lsm.stats();
         assert!(
-            stats.compaction_stats.total_compactions > 0 || !stats.levels[0].sstables.is_empty()
+            stats.compaction_stats.compactions_completed > 0
+                || !stats.levels[0].sstables.is_empty()
         );
 
         std::fs::remove_dir_all(&dir).ok();

@@ -1,18 +1,30 @@
 # amaters-sdk-rust
 
-Rust SDK for AmateRS
+Rust client SDK for [AmateRS](https://github.com/cool-japan/amaters) — a distributed, Fully Homomorphic Encrypted (FHE) database system.
+
+> **Status**: Alpha — API is stabilising. Not yet recommended for production use.
 
 ## Overview
 
-`amaters-sdk-rust` provides a high-level, ergonomic Rust client library for interacting with AmateRS servers. It handles FHE encryption, network communication, and provides a fluent API for queries.
+`amaters-sdk-rust` provides a high-level, ergonomic Rust client library for interacting with AmateRS servers. It covers connection lifecycle management (including health checks and automatic reconnection), a client-side LRU/TTL cache, cursor-based pagination with blake3 integrity verification, flexible sorting, batch operations, and range queries.
+
+- 126 tests
+- 191 public API items
+- Version: 0.2.0
+- License: Apache-2.0
 
 ## Features
 
-- **Type-Safe API**: Compile-time query validation
-- **FHE Encryption**: Automatic client-side encryption
-- **Connection Management**: Pooling and retry logic
-- **Async/Await**: Built on Tokio
-- **Error Handling**: Comprehensive Result types
+- **Connection manager** — pooling, health checks, and automatic reconnection
+- **Client-side caching** — LRU eviction with configurable TTL per entry
+- **Cursor-based pagination** — stateless cursors with blake3 integrity checks
+- **Sorting** — order results by key, value, timestamp, or size
+- **Batch operations** — multi-key get/set/delete in a single round-trip
+- **Range queries** — efficient key-range scans
+- **Streaming queries** — `stream_query()` returns `QueryStream` (implements `futures::Stream`); backpressure via bounded `tokio::sync::mpsc`; cooperative cancellation via `CancellationToken` from `tokio_util::sync`
+- **Property-based tests** — proptest strategies for `QueryBuilder`, `AmatersError`, and codec round-trips
+- **Async/Await** — built on Tokio
+- **Comprehensive error types** — structured `Result`-based API throughout
 
 ## Installation
 
@@ -20,38 +32,29 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-amaters-sdk-rust = "0.1"
+amaters-sdk-rust = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
 ## Quick Start
 
 ```rust
-use amaters_sdk_rust::{AmateRSClient, CipherBlob, Key};
+use amaters_sdk_rust::{AmateRSClient, ClientConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Connect to server
-    let client = AmateRSClient::connect("https://localhost:7878").await?;
+    let config = ClientConfig::builder()
+        .endpoint("http://127.0.0.1:7777")
+        .build()?;
 
-    // Generate FHE keys (client-side)
-    let (public_key, secret_key) = client.generate_keys()?;
+    let client = AmateRSClient::connect(config).await?;
 
-    // Encrypt data
-    let data = b"sensitive information";
-    let encrypted = client.encrypt(data, &public_key)?;
+    // Store a value
+    client.set("users", b"user:42", b"alice").await?;
 
-    // Store encrypted data
-    let key = Key::from_str("user:123");
-    client.set("users", &key, &encrypted).await?;
-
-    // Retrieve encrypted data
-    let result = client.get("users", &key).await?;
-
-    // Decrypt locally
-    if let Some(cipher) = result {
-        let plaintext = client.decrypt(&cipher, &secret_key)?;
-        println!("Decrypted: {:?}", plaintext);
+    // Retrieve a value
+    if let Some(val) = client.get("users", b"user:42").await? {
+        println!("Got: {:?}", val);
     }
 
     Ok(())
@@ -64,36 +67,16 @@ async fn main() -> anyhow::Result<()> {
 
 ```rust
 // Insert
-client.set("collection", &key, &value).await?;
+client.set("collection", b"key", b"value").await?;
 
 // Get
-let value = client.get("collection", &key).await?;
+let value = client.get("collection", b"key").await?;
 
 // Delete
-client.delete("collection", &key).await?;
+client.delete("collection", b"key").await?;
 
 // Check existence
-let exists = client.contains("collection", &key).await?;
-```
-
-### Queries
-
-```rust
-use amaters_sdk_rust::{QueryBuilder, Predicate, col};
-
-// Filter query
-let results = client.query()
-    .collection("users")
-    .filter(Predicate::Eq(col("age"), encrypted_age))
-    .execute()
-    .await?;
-
-// Range query
-let results = client.query()
-    .collection("users")
-    .range(Key::from_str("user:000"), Key::from_str("user:100"))
-    .execute()
-    .await?;
+let exists = client.contains("collection", b"key").await?;
 ```
 
 ### Batch Operations
@@ -101,84 +84,81 @@ let results = client.query()
 ```rust
 // Batch insert
 let items = vec![
-    (key1, value1),
-    (key2, value2),
-    (key3, value3),
+    (b"key1".to_vec(), b"value1".to_vec()),
+    (b"key2".to_vec(), b"value2".to_vec()),
 ];
 client.batch_set("collection", items).await?;
 
 // Batch get
-let keys = vec![key1, key2, key3];
+let keys = vec![b"key1".to_vec(), b"key2".to_vec()];
 let results = client.batch_get("collection", keys).await?;
 ```
 
-### FHE Operations
+### Range Queries
 
 ```rust
-// Homomorphic addition
-let encrypted_result = client.fhe_add(&encrypted_a, &encrypted_b).await?;
-
-// Homomorphic comparison
-let encrypted_gt = client.fhe_gt(&encrypted_a, &encrypted_b).await?;
-
-// Decrypt result locally
-let result = client.decrypt(&encrypted_result, &secret_key)?;
-```
-
-## Configuration
-
-```rust
-let client = AmateRSClient::builder()
-    .endpoint("https://localhost:7878")
-    .timeout(Duration::from_secs(30))
-    .retry_policy(RetryPolicy::Exponential { max_attempts: 3 })
-    .tls_config(tls_config)
-    .build()
+let results = client
+    .range("users", b"user:000"..=b"user:099")
     .await?;
 ```
 
-## Error Handling
+### Cursor-Based Pagination
 
 ```rust
-use amaters_sdk_rust::{Error, ErrorKind};
+let page = client
+    .scan("collection")
+    .limit(50)
+    .cursor(cursor_token)  // blake3-verified cursor
+    .execute()
+    .await?;
 
-match client.get("collection", &key).await {
-    Ok(Some(value)) => println!("Found: {:?}", value),
-    Ok(None) => println!("Not found"),
-    Err(e) => match e.kind() {
-        ErrorKind::Network => println!("Network error"),
-        ErrorKind::Encryption => println!("Encryption error"),
-        ErrorKind::ServerError => println!("Server error"),
-        _ => println!("Other error"),
-    }
-}
+let next_cursor = page.next_cursor();
 ```
 
-## Examples
+### Sorting
 
-See `examples/` directory:
-- `examples/quickstart.rs` - Basic usage
-- `examples/queries.rs` - Query examples
-- `examples/batch.rs` - Batch operations
-- `examples/fhe_operations.rs` - FHE examples
+```rust
+use amaters_sdk_rust::SortBy;
+
+let results = client
+    .scan("logs")
+    .sort_by(SortBy::Timestamp)
+    .execute()
+    .await?;
+```
+
+### Connection Configuration
+
+```rust
+use std::time::Duration;
+
+let config = ClientConfig::builder()
+    .endpoint("http://127.0.0.1:7777")
+    .connect_timeout(Duration::from_secs(5))
+    .request_timeout(Duration::from_secs(30))
+    .max_reconnect_attempts(5)
+    .cache_capacity(1024)
+    .cache_ttl(Duration::from_secs(60))
+    .build()?;
+
+let client = AmateRSClient::connect(config).await?;
+```
 
 ## Testing
 
 ```bash
-# Run tests (requires running server)
+# Run all tests
 cargo test
 
-# Run integration tests
-cargo test --test integration
-
-# Run examples
-cargo run --example quickstart
+# Run with all features
+cargo test --all-features
 ```
 
 ## License
 
-Licensed under MIT OR Apache-2.0
+Apache-2.0
 
 ## Authors
 
 **COOLJAPAN OU (Team KitaSan)**
+Source: <https://github.com/cool-japan/amaters>

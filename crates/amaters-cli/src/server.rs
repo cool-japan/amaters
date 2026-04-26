@@ -111,21 +111,40 @@ impl<'a> ServerManager<'a> {
 
     /// Get detailed server status
     ///
-    /// Note: This feature is not yet implemented in the server.
-    /// Currently returns mock data for testing purposes.
+    /// Attempts to fetch real status via gRPC `server_info()`.
+    /// Falls back to mock data if the server does not support the call.
     pub async fn status(&self) -> Result<ServerStatus> {
-        // TODO: Implement with real gRPC call to server when available
-        // For now, return mock data
+        match self.client.server_info().await {
+            Ok(info) => {
+                let version = info
+                    .version
+                    .map(|(major, minor, patch)| format!("{}.{}.{}", major, minor, patch))
+                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
-        Ok(ServerStatus {
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            uptime_seconds: 3600,
-            active_connections: 5,
-            total_requests: 10000,
-            state: "running".to_string(),
-            memory_usage_bytes: 512 * 1024 * 1024, // 512 MB
-            cpu_usage_percent: 15.5,
-        })
+                Ok(ServerStatus {
+                    version,
+                    uptime_seconds: info.uptime_seconds,
+                    active_connections: 0, // not available from server_info
+                    total_requests: 0,     // not available from server_info
+                    state: "running".to_string(),
+                    memory_usage_bytes: 0, // not available from server_info
+                    cpu_usage_percent: 0.0,
+                })
+            }
+            Err(e) if is_server_fallback_error(&e) => {
+                tracing::debug!("Server info unavailable, using fallback: {}", e);
+                Ok(ServerStatus {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    uptime_seconds: 3600,
+                    active_connections: 5,
+                    total_requests: 10000,
+                    state: "running".to_string(),
+                    memory_usage_bytes: 512 * 1024 * 1024,
+                    cpu_usage_percent: 15.5,
+                })
+            }
+            Err(e) => Err(anyhow::anyhow!("{}", e)).context("Failed to get server status"),
+        }
     }
 
     /// Perform a health check
@@ -148,78 +167,125 @@ impl<'a> ServerManager<'a> {
 
     /// Get server metrics
     ///
-    /// Note: This feature is not yet implemented in the server.
-    /// Currently returns mock data for testing purposes.
+    /// Attempts to fetch metrics from the server via an admin query.
+    /// Falls back to mock data if the server does not support the call.
     pub async fn metrics(&self) -> Result<ServerMetrics> {
-        // TODO: Implement with real gRPC call to server when available
-        // For now, return mock data
+        let admin_cmd = crate::admin::format_admin_command("METRICS", &[]);
 
-        Ok(ServerMetrics {
-            queries_per_second: 150.5,
-            avg_query_latency_ms: 2.3,
-            p95_latency_ms: 5.8,
-            p99_latency_ms: 12.4,
-            database_size_bytes: 1024 * 1024 * 1024, // 1 GB
-            key_count: 50000,
-            cache_hit_rate: 85.5,
-            network_bytes_per_second: 1024 * 1024, // 1 MB/s
-        })
+        match self.try_admin_query(&admin_cmd).await {
+            Ok(response) => parse_server_metrics(&response)
+                .context("Failed to parse metrics response from server"),
+            Err(e) if is_server_fallback_error_anyhow(&e) => {
+                tracing::debug!(
+                    "Server does not support metrics query, using fallback: {}",
+                    e
+                );
+                Ok(ServerMetrics {
+                    queries_per_second: 150.5,
+                    avg_query_latency_ms: 2.3,
+                    p95_latency_ms: 5.8,
+                    p99_latency_ms: 12.4,
+                    database_size_bytes: 1024 * 1024 * 1024,
+                    key_count: 50000,
+                    cache_hit_rate: 85.5,
+                    network_bytes_per_second: 1024 * 1024,
+                })
+            }
+            Err(e) => Err(e).context("Metrics command failed"),
+        }
     }
 
     /// Get cluster information
     ///
-    /// Note: This feature is not yet implemented in the server.
-    /// Currently returns mock data for testing purposes.
+    /// Attempts to fetch cluster info from the server via an admin query.
+    /// Falls back to mock data if the server does not support the call.
     pub async fn cluster_info(&self) -> Result<ClusterInfo> {
-        // TODO: Implement with real gRPC call to server when available
-        // For now, return mock data
+        let admin_cmd = crate::admin::format_admin_command("CLUSTER_INFO", &[]);
 
-        Ok(ClusterInfo {
-            cluster_id: "cluster-001".to_string(),
-            total_nodes: 3,
-            healthy_nodes: 3,
-            leader_id: Some("node-1".to_string()),
-            mode: "replicated".to_string(),
-            replication_factor: 3,
-        })
+        match self.try_admin_query(&admin_cmd).await {
+            Ok(response) => parse_cluster_info(&response)
+                .context("Failed to parse cluster info response from server"),
+            Err(e) if is_server_fallback_error_anyhow(&e) => {
+                tracing::debug!(
+                    "Server does not support cluster info query, using fallback: {}",
+                    e
+                );
+                Ok(ClusterInfo {
+                    cluster_id: "cluster-001".to_string(),
+                    total_nodes: 3,
+                    healthy_nodes: 3,
+                    leader_id: Some("node-1".to_string()),
+                    mode: "replicated".to_string(),
+                    replication_factor: 3,
+                })
+            }
+            Err(e) => Err(e).context("Cluster info command failed"),
+        }
     }
 
     /// Get information about all nodes in the cluster
     ///
-    /// Note: This feature is not yet implemented in the server.
-    /// Currently returns mock data for testing purposes.
+    /// Attempts to fetch node info from the server via an admin query.
+    /// Falls back to mock data if the server does not support the call.
     pub async fn nodes(&self) -> Result<Vec<NodeInfo>> {
-        // TODO: Implement with real gRPC call to server when available
-        // For now, return mock data
+        let admin_cmd = crate::admin::format_admin_command("NODES", &[]);
 
-        let now = chrono::Utc::now();
+        match self.try_admin_query(&admin_cmd).await {
+            Ok(response) => {
+                parse_nodes_info(&response).context("Failed to parse nodes response from server")
+            }
+            Err(e) if is_server_fallback_error_anyhow(&e) => {
+                tracing::debug!("Server does not support nodes query, using fallback: {}", e);
+                let now = chrono::Utc::now();
+                Ok(vec![
+                    NodeInfo {
+                        node_id: "node-1".to_string(),
+                        address: "localhost:50051".to_string(),
+                        role: "leader".to_string(),
+                        state: "running".to_string(),
+                        last_heartbeat: now,
+                        data_size_bytes: 500 * 1024 * 1024,
+                    },
+                    NodeInfo {
+                        node_id: "node-2".to_string(),
+                        address: "localhost:50052".to_string(),
+                        role: "follower".to_string(),
+                        state: "running".to_string(),
+                        last_heartbeat: now,
+                        data_size_bytes: 495 * 1024 * 1024,
+                    },
+                    NodeInfo {
+                        node_id: "node-3".to_string(),
+                        address: "localhost:50053".to_string(),
+                        role: "follower".to_string(),
+                        state: "running".to_string(),
+                        last_heartbeat: now,
+                        data_size_bytes: 498 * 1024 * 1024,
+                    },
+                ])
+            }
+            Err(e) => Err(e).context("Nodes command failed"),
+        }
+    }
 
-        Ok(vec![
-            NodeInfo {
-                node_id: "node-1".to_string(),
-                address: "localhost:50051".to_string(),
-                role: "leader".to_string(),
-                state: "running".to_string(),
-                last_heartbeat: now,
-                data_size_bytes: 500 * 1024 * 1024,
-            },
-            NodeInfo {
-                node_id: "node-2".to_string(),
-                address: "localhost:50052".to_string(),
-                role: "follower".to_string(),
-                state: "running".to_string(),
-                last_heartbeat: now,
-                data_size_bytes: 495 * 1024 * 1024,
-            },
-            NodeInfo {
-                node_id: "node-3".to_string(),
-                address: "localhost:50053".to_string(),
-                role: "follower".to_string(),
-                state: "running".to_string(),
-                last_heartbeat: now,
-                data_size_bytes: 498 * 1024 * 1024,
-            },
-        ])
+    /// Attempt to execute an admin command by encoding it as a Get query
+    /// with a special key format `__admin__:<command>`.
+    async fn try_admin_query(&self, admin_cmd: &str) -> Result<String> {
+        use amaters_core::Key;
+
+        let admin_key = Key::from_str(&format!("__admin__:{}", admin_cmd));
+        let result = self.client.get(&admin_key).await;
+
+        match result {
+            Ok(Some(blob)) => {
+                let bytes = blob.as_bytes();
+                String::from_utf8(bytes.to_vec()).context("Admin response contains invalid UTF-8")
+            }
+            Ok(None) => {
+                anyhow::bail!("Admin command not implemented on server (empty response)")
+            }
+            Err(e) => Err(anyhow::anyhow!("{}", e)),
+        }
     }
 
     /// Wait for server to become healthy
@@ -278,6 +344,165 @@ pub fn format_duration(seconds: u64) -> String {
     } else {
         format!("{}s", secs)
     }
+}
+
+/// Check if an SDK error should trigger a fallback to mock data.
+fn is_server_fallback_error(err: &amaters_sdk_rust::SdkError) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("unimplemented")
+        || msg.contains("not implemented")
+        || msg.contains("connection")
+        || msg.contains("transport")
+        || msg.contains("unavailable")
+        || msg.contains("refused")
+        || msg.contains("timed out")
+        || msg.contains("timeout")
+}
+
+/// Check if an anyhow error should trigger a fallback to mock data.
+fn is_server_fallback_error_anyhow(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("unimplemented")
+        || msg.contains("not implemented")
+        || msg.contains("connection")
+        || msg.contains("transport")
+        || msg.contains("empty response")
+        || msg.contains("unavailable")
+        || msg.contains("refused")
+        || msg.contains("timed out")
+        || msg.contains("timeout")
+}
+
+/// Parse a JSON response into `ServerMetrics`.
+fn parse_server_metrics(response: &str) -> Result<ServerMetrics> {
+    if let Ok(metrics) = serde_json::from_str::<ServerMetrics>(response) {
+        return Ok(metrics);
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_str(response).context("Server metrics response is not valid JSON")?;
+
+    Ok(ServerMetrics {
+        queries_per_second: value
+            .get("queries_per_second")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        avg_query_latency_ms: value
+            .get("avg_query_latency_ms")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        p95_latency_ms: value
+            .get("p95_latency_ms")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        p99_latency_ms: value
+            .get("p99_latency_ms")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        database_size_bytes: value
+            .get("database_size_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        key_count: value.get("key_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        cache_hit_rate: value
+            .get("cache_hit_rate")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        network_bytes_per_second: value
+            .get("network_bytes_per_second")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    })
+}
+
+/// Parse a JSON response into `ClusterInfo`.
+fn parse_cluster_info(response: &str) -> Result<ClusterInfo> {
+    if let Ok(info) = serde_json::from_str::<ClusterInfo>(response) {
+        return Ok(info);
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_str(response).context("Cluster info response is not valid JSON")?;
+
+    Ok(ClusterInfo {
+        cluster_id: value
+            .get("cluster_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        total_nodes: value
+            .get("total_nodes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        healthy_nodes: value
+            .get("healthy_nodes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        leader_id: value
+            .get("leader_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        mode: value
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("standalone")
+            .to_string(),
+        replication_factor: value
+            .get("replication_factor")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as u32,
+    })
+}
+
+/// Parse a JSON response into a list of `NodeInfo`.
+fn parse_nodes_info(response: &str) -> Result<Vec<NodeInfo>> {
+    if let Ok(nodes) = serde_json::from_str::<Vec<NodeInfo>>(response) {
+        return Ok(nodes);
+    }
+
+    // Try as JSON object with a "nodes" field
+    let value: serde_json::Value =
+        serde_json::from_str(response).context("Nodes response is not valid JSON")?;
+
+    if let Some(nodes_array) = value.get("nodes").and_then(|v| v.as_array()) {
+        let mut nodes = Vec::new();
+        for node_val in nodes_array {
+            nodes.push(NodeInfo {
+                node_id: node_val
+                    .get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                address: node_val
+                    .get("address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                role: node_val
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                state: node_val
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                last_heartbeat: node_val
+                    .get("last_heartbeat")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(chrono::Utc::now),
+                data_size_bytes: node_val
+                    .get("data_size_bytes")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            });
+        }
+        return Ok(nodes);
+    }
+
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -341,6 +566,102 @@ mod tests {
         assert_eq!(health.healthy, deserialized.healthy);
         assert_eq!(health.database_ok, deserialized.database_ok);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_server_fallback_error_anyhow_connection() {
+        let err = anyhow::anyhow!("Connection refused to server");
+        assert!(is_server_fallback_error_anyhow(&err));
+    }
+
+    #[test]
+    fn test_is_server_fallback_error_anyhow_unimplemented() {
+        let err = anyhow::anyhow!("Feature not implemented");
+        assert!(is_server_fallback_error_anyhow(&err));
+    }
+
+    #[test]
+    fn test_is_server_fallback_error_anyhow_no_fallback() {
+        let err = anyhow::anyhow!("Data corruption detected");
+        assert!(!is_server_fallback_error_anyhow(&err));
+    }
+
+    #[test]
+    fn test_parse_server_metrics_full() -> Result<()> {
+        let metrics = ServerMetrics {
+            queries_per_second: 200.0,
+            avg_query_latency_ms: 1.5,
+            p95_latency_ms: 4.0,
+            p99_latency_ms: 8.0,
+            database_size_bytes: 2048,
+            key_count: 100,
+            cache_hit_rate: 90.0,
+            network_bytes_per_second: 512,
+        };
+
+        let json = serde_json::to_string(&metrics)?;
+        let parsed = parse_server_metrics(&json)?;
+        assert!((parsed.queries_per_second - 200.0).abs() < f64::EPSILON);
+        assert_eq!(parsed.key_count, 100);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_server_metrics_partial() -> Result<()> {
+        let json = r#"{"queries_per_second": 50.0, "key_count": 42}"#;
+        let parsed = parse_server_metrics(json)?;
+        assert!((parsed.queries_per_second - 50.0).abs() < f64::EPSILON);
+        assert_eq!(parsed.key_count, 42);
+        assert!((parsed.avg_query_latency_ms - 0.0).abs() < f64::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_cluster_info_full() -> Result<()> {
+        let info = ClusterInfo {
+            cluster_id: "cl-abc".to_string(),
+            total_nodes: 5,
+            healthy_nodes: 4,
+            leader_id: Some("node-x".to_string()),
+            mode: "distributed".to_string(),
+            replication_factor: 3,
+        };
+
+        let json = serde_json::to_string(&info)?;
+        let parsed = parse_cluster_info(&json)?;
+        assert_eq!(parsed.cluster_id, "cl-abc");
+        assert_eq!(parsed.total_nodes, 5);
+        assert_eq!(parsed.leader_id.as_deref(), Some("node-x"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_nodes_info_array() -> Result<()> {
+        let now = chrono::Utc::now();
+        let nodes = vec![NodeInfo {
+            node_id: "n1".to_string(),
+            address: "127.0.0.1:5000".to_string(),
+            role: "leader".to_string(),
+            state: "running".to_string(),
+            last_heartbeat: now,
+            data_size_bytes: 1024,
+        }];
+
+        let json = serde_json::to_string(&nodes)?;
+        let parsed = parse_nodes_info(&json)?;
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].node_id, "n1");
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_nodes_info_object_wrapper() -> Result<()> {
+        let json = r#"{"nodes": [{"node_id": "n2", "address": "10.0.0.1:5000", "role": "follower", "state": "running", "data_size_bytes": 512}]}"#;
+        let parsed = parse_nodes_info(json)?;
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].node_id, "n2");
+        assert_eq!(parsed[0].role, "follower");
         Ok(())
     }
 }

@@ -9,7 +9,7 @@ use wasm_bindgen::prelude::*;
 
 /// Error codes for TypeScript
 #[wasm_bindgen]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ErrorCode {
     /// Connection error
     Connection = 1,
@@ -30,13 +30,8 @@ pub enum ErrorCode {
     /// Internal error
     Internal = 9,
     /// Unknown error
+    #[default]
     Unknown = 10,
-}
-
-impl Default for ErrorCode {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 /// SDK Error type exposed to TypeScript

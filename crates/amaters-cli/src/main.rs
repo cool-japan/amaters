@@ -3,19 +3,23 @@
 //! Command-line interface for interacting with AmateRS encrypted database.
 
 mod admin;
+mod batch;
 mod client;
 mod config;
 mod keys;
 mod output;
 mod progress;
+mod repl;
 mod server;
 
 use amaters_core::{CipherBlob, Key};
+use amaters_sdk_rust::PaginationConfig;
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use client::Client;
 use config::Config;
 use output::OutputFormat;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "amaters-cli")]
@@ -66,12 +70,45 @@ enum Commands {
         start: String,
         /// End key (exclusive)
         end: String,
+        /// Maximum results to return
+        #[arg(long, help = "Maximum results to return")]
+        limit: Option<u64>,
+        /// Number of results to skip
+        #[arg(long, help = "Number of results to skip")]
+        offset: Option<u64>,
+        /// Continuation cursor for next page
+        #[arg(long, help = "Continuation cursor for next page")]
+        cursor: Option<String>,
+    },
+
+    /// Prefix scan (paginated)
+    Scan {
+        /// Key prefix to scan
+        prefix: String,
+        /// Maximum results to return
+        #[arg(long, help = "Maximum results to return")]
+        limit: Option<u64>,
+        /// Number of results to skip
+        #[arg(long, help = "Number of results to skip")]
+        offset: Option<u64>,
+        /// Continuation cursor for next page
+        #[arg(long, help = "Continuation cursor for next page")]
+        cursor: Option<String>,
     },
 
     /// Query with filter expression
     Query {
         /// Filter expression (AQL syntax)
         filter: String,
+        /// Maximum results to return
+        #[arg(long, help = "Maximum results to return")]
+        limit: Option<u64>,
+        /// Number of results to skip
+        #[arg(long, help = "Number of results to skip")]
+        offset: Option<u64>,
+        /// Continuation cursor for next page
+        #[arg(long, help = "Continuation cursor for next page")]
+        cursor: Option<String>,
     },
 
     /// FHE key management
@@ -91,14 +128,96 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+        /// Output file path (default: stdout)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
+
+    /// Start interactive REPL mode
+    Interactive {
+        /// Server URL to connect to
+        #[arg(short = 'u', long, default_value = "http://localhost:7878")]
+        server: String,
+    },
+
+    /// Process batch operations from a file or stdin
+    ///
+    /// Line format: `<op> <key> [value]`  (op = "put" | "delete")
+    ///
+    /// Examples:
+    ///   amaters-cli batch ops.txt
+    ///   amaters-cli batch -
+    Batch {
+        /// Source file path, or "-" to read from stdin
+        source: String,
+    },
+
+    /// Re-execute a command every <interval_secs> seconds
+    ///
+    /// Example:
+    ///   amaters-cli watch 5 server status
+    Watch {
+        /// Interval in seconds between executions
+        interval_secs: u64,
+        /// Command arguments to execute repeatedly (e.g. "server status")
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
 enum ConfigAction {
     /// Show current configuration
-    Show,
-    /// Initialize configuration file
-    Init,
+    Show {
+        /// Path to config file (default: ~/.amaters/config.toml)
+        #[arg(short, long)]
+        path: Option<std::path::PathBuf>,
+        /// Output format: toml, json, yaml
+        #[arg(short, long, default_value = "toml")]
+        format: String,
+        /// Show only a specific section (server, storage, network, cluster, logging, metrics)
+        #[arg(short, long)]
+        section: Option<String>,
+    },
+    /// Initialize a config file with default template
+    Init {
+        /// Path to config file (default: ~/.amaters/config.toml)
+        #[arg(short, long)]
+        path: Option<std::path::PathBuf>,
+        /// Overwrite existing config file
+        #[arg(long)]
+        force: bool,
+    },
+    /// Validate a config file
+    Validate {
+        /// Path to config file (default: ~/.amaters/config.toml)
+        #[arg(short, long)]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Get a config value by dot-notation key (e.g. server.port)
+    Get {
+        /// Key in dot notation
+        key: String,
+        /// Path to config file
+        #[arg(short, long)]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Set a config value by dot-notation key
+    Set {
+        /// Key in dot notation
+        key: String,
+        /// Value to set
+        value: String,
+        /// Path to config file
+        #[arg(short, long)]
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -249,6 +368,25 @@ async fn execute_command(command: Commands, config: &Config, format: OutputForma
         Commands::Key(key_cmd) => {
             execute_key_command(key_cmd, format).await?;
         }
+        Commands::Completions { shell, output } => {
+            generate_completions(shell, output)?;
+        }
+        Commands::Interactive { server } => {
+            let repl_config = repl::ReplConfig {
+                server_url: server,
+                default_collection: config.default_collection.clone(),
+                output_format: format,
+                ..repl::ReplConfig::default()
+            };
+            let mut repl_instance = repl::Repl::new(repl_config);
+            repl_instance.run().await.context("REPL session failed")?;
+        }
+        Commands::Watch {
+            interval_secs,
+            args,
+        } => {
+            execute_watch(interval_secs, args, config, format).await?;
+        }
         _ => {
             // Connect to server for all other commands
             let client = Client::connect(&config.server_url, config.default_collection.clone())
@@ -265,11 +403,30 @@ async fn execute_command(command: Commands, config: &Config, format: OutputForma
                 Commands::Delete { key } => {
                     execute_delete(&client, &key, format).await?;
                 }
-                Commands::Range { start, end } => {
-                    execute_range(&client, &start, &end, format).await?;
+                Commands::Range {
+                    start,
+                    end,
+                    limit,
+                    offset,
+                    cursor,
+                } => {
+                    execute_range(&client, &start, &end, limit, offset, cursor, format).await?;
                 }
-                Commands::Query { filter } => {
-                    execute_query(&client, &filter, format).await?;
+                Commands::Scan {
+                    prefix,
+                    limit,
+                    offset,
+                    cursor,
+                } => {
+                    execute_scan(&client, &prefix, limit, offset, cursor, format).await?;
+                }
+                Commands::Query {
+                    filter,
+                    limit,
+                    offset,
+                    cursor,
+                } => {
+                    execute_query(&client, &filter, limit, offset, cursor, format).await?;
                 }
                 Commands::Server(server_cmd) => {
                     execute_server_command(server_cmd, &client, format).await?;
@@ -277,9 +434,82 @@ async fn execute_command(command: Commands, config: &Config, format: OutputForma
                 Commands::Admin(admin_cmd) => {
                     execute_admin_command(admin_cmd, &client, format).await?;
                 }
-                Commands::Config { .. } | Commands::Key(_) => {
+                Commands::Batch { source } => {
+                    execute_batch(&client, &source, format).await?;
+                }
+                Commands::Config { .. }
+                | Commands::Key(_)
+                | Commands::Completions { .. }
+                | Commands::Interactive { .. }
+                | Commands::Watch { .. } => {
                     // Already handled above
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate shell completions and write them to stdout or a file.
+///
+/// When writing to stdout, installation hints are printed as comments
+/// after the completion script.
+fn generate_completions(shell: clap_complete::Shell, output: Option<PathBuf>) -> Result<()> {
+    use clap_complete::Shell;
+
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "amaters-cli", &mut buf);
+
+    match output {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("Failed to create directory: {}", parent.display())
+                    })?;
+                }
+            }
+            std::fs::write(&path, &buf)
+                .with_context(|| format!("Failed to write completions to {}", path.display()))?;
+            eprintln!("Completions written to {}", path.display());
+        }
+        None => {
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(&buf)
+                .context("Failed to write completions to stdout")?;
+
+            // Print installation hints as comments to stderr so they don't
+            // interfere with piping the completion script.
+            let hints = match shell {
+                Shell::Bash => {
+                    "# Installation:\n\
+                     #   source <(amaters-cli completions bash)\n\
+                     # Or persist:\n\
+                     #   amaters-cli completions bash > ~/.local/share/bash-completion/completions/amaters-cli"
+                }
+                Shell::Zsh => {
+                    "# Installation:\n\
+                     #   amaters-cli completions zsh > ~/.zfunc/_amaters-cli\n\
+                     #   # Then add to ~/.zshrc: fpath+=~/.zfunc; autoload -Uz compinit && compinit"
+                }
+                Shell::Fish => {
+                    "# Installation:\n\
+                     #   amaters-cli completions fish > ~/.config/fish/completions/amaters-cli.fish"
+                }
+                Shell::PowerShell => {
+                    "# Installation:\n\
+                     #   amaters-cli completions powershell >> $PROFILE"
+                }
+                Shell::Elvish => {
+                    "# Installation:\n\
+                     #   amaters-cli completions elvish > ~/.config/elvish/lib/amaters-cli.elv"
+                }
+                _ => "",
+            };
+            if !hints.is_empty() {
+                eprintln!("\n{hints}");
             }
         }
     }
@@ -323,26 +553,86 @@ async fn execute_delete(client: &Client, key: &str, format: OutputFormat) -> Res
     Ok(())
 }
 
+/// Build a `PaginationConfig` from optional CLI pagination flags.
+fn build_pagination(
+    limit: Option<u64>,
+    offset: Option<u64>,
+    cursor: Option<String>,
+) -> PaginationConfig {
+    let mut cfg = PaginationConfig::default();
+    if let Some(l) = limit {
+        cfg.page_size = l as usize;
+    }
+    if let Some(o) = offset {
+        cfg.offset = o as usize;
+    }
+    if let Some(c) = cursor {
+        cfg.cursor = Some(c);
+    }
+    cfg
+}
+
 async fn execute_range(
     client: &Client,
     start: &str,
     end: &str,
+    limit: Option<u64>,
+    offset: Option<u64>,
+    cursor: Option<String>,
     format: OutputFormat,
 ) -> Result<()> {
     let start_key = Key::from_str(start);
     let end_key = Key::from_str(end);
 
-    let results = client
-        .range(&start_key, &end_key)
-        .await
-        .context("Failed to execute range query")?;
-
-    output::print_range_result(&results, format)?;
+    // Use paginated path when any pagination flag is present, otherwise use the
+    // simple (non-paginated) path for backwards-compatible behaviour.
+    if limit.is_some() || offset.is_some() || cursor.is_some() {
+        let pagination = build_pagination(limit, offset, cursor);
+        let result = client
+            .range_paginated(&start_key, &end_key, &pagination)
+            .await
+            .context("Failed to execute range query")?;
+        output::print_paginated_result(&result.items, result.next_cursor.as_deref(), format)?;
+    } else {
+        let results = client
+            .range(&start_key, &end_key)
+            .await
+            .context("Failed to execute range query")?;
+        output::print_range_result(&results, format)?;
+    }
 
     Ok(())
 }
 
-async fn execute_query(client: &Client, filter: &str, format: OutputFormat) -> Result<()> {
+async fn execute_scan(
+    client: &Client,
+    prefix: &str,
+    limit: Option<u64>,
+    offset: Option<u64>,
+    cursor: Option<String>,
+    format: OutputFormat,
+) -> Result<()> {
+    let prefix_key = Key::from_str(prefix);
+    let pagination = build_pagination(limit, offset, cursor);
+
+    let result = client
+        .scan(&prefix_key, &pagination)
+        .await
+        .context("Failed to execute scan")?;
+
+    output::print_paginated_result(&result.items, result.next_cursor.as_deref(), format)?;
+
+    Ok(())
+}
+
+async fn execute_query(
+    client: &Client,
+    filter: &str,
+    _limit: Option<u64>,
+    _offset: Option<u64>,
+    _cursor: Option<String>,
+    format: OutputFormat,
+) -> Result<()> {
     let results = client
         .query(filter)
         .await
@@ -353,24 +643,140 @@ async fn execute_query(client: &Client, filter: &str, format: OutputFormat) -> R
     Ok(())
 }
 
-fn execute_config_command(action: ConfigAction, config: &Config) -> Result<()> {
-    match action {
-        ConfigAction::Show => {
-            let config_str =
-                toml::to_string_pretty(config).context("Failed to serialize configuration")?;
-            println!("{}", config_str);
+async fn execute_batch(client: &Client, source: &str, _format: OutputFormat) -> Result<()> {
+    use batch::{BatchCommand, BatchSource};
+
+    let batch_source = if source == "-" {
+        BatchSource::Stdin
+    } else {
+        BatchSource::File(std::path::PathBuf::from(source))
+    };
+
+    let cmd = BatchCommand::new(batch_source);
+    let stats = cmd
+        .execute(client)
+        .await
+        .context("Batch operation failed")?;
+
+    println!(
+        "Batch complete: {} total, {} succeeded, {} failed, {} skipped",
+        stats.total, stats.succeeded, stats.failed, stats.skipped
+    );
+
+    Ok(())
+}
+
+/// Core watch loop — calls `f` every `interval` until `f` returns `false` or a
+/// cancellation signal is received.
+///
+/// Extracted as a standalone async function so it can be tested with a simple
+/// closure without involving CLI parsing or a real server.
+///
+/// The closure must return a `Pin<Box<dyn Future<Output = bool>>>` to allow
+/// recursive call chains (e.g., watch re-dispatching to `execute_command`).
+pub async fn watch_loop<F>(interval: std::time::Duration, mut f: F)
+where
+    F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool>>>,
+{
+    use tokio::time::MissedTickBehavior;
+
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let keep_going = f().await;
+                if !keep_going {
+                    break;
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                break;
+            }
         }
-        ConfigAction::Init => {
-            let config_path = Config::config_path()?;
-            if config_path.exists() {
-                anyhow::bail!(
-                    "Configuration file already exists at: {}",
-                    config_path.display()
-                );
+    }
+}
+
+async fn execute_watch(
+    interval_secs: u64,
+    args: Vec<String>,
+    config: &Config,
+    format: OutputFormat,
+) -> Result<()> {
+    use std::io::Write;
+
+    if args.is_empty() {
+        anyhow::bail!("watch requires at least one command argument");
+    }
+
+    let interval = std::time::Duration::from_secs(interval_secs);
+    let config = config.clone();
+
+    // Prefix the binary name so Cli::try_parse_from works correctly.
+    let mut full_args = vec!["amaters-cli".to_string()];
+    full_args.extend(args.iter().cloned());
+
+    watch_loop(interval, || {
+        let full_args = full_args.clone();
+        let config = config.clone();
+        Box::pin(async move {
+            // Clear screen + cursor home (ANSI)
+            print!("\x1b[2J\x1b[H");
+            if let Err(e) = std::io::stdout().flush() {
+                eprintln!("flush error: {e}");
             }
 
-            config.save()?;
-            println!("✓ Configuration initialized at: {}", config_path.display());
+            match Cli::try_parse_from(full_args) {
+                Ok(cli) => {
+                    let mut cfg = config.clone();
+                    if let Some(s) = cli.server {
+                        cfg.server_url = s;
+                    }
+                    if let Some(c) = cli.collection {
+                        cfg.default_collection = c;
+                    }
+                    let fmt = cli
+                        .format
+                        .as_deref()
+                        .and_then(OutputFormat::from_str)
+                        .unwrap_or(format);
+                    if let Err(e) = execute_command(cli.command, &cfg, fmt).await {
+                        output::print_error(&e, fmt);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("watch: failed to parse command: {e}");
+                }
+            }
+            true // keep looping
+        })
+    })
+    .await;
+
+    Ok(())
+}
+
+fn execute_config_command(action: ConfigAction, _config: &Config) -> Result<()> {
+    match action {
+        ConfigAction::Show {
+            path,
+            format,
+            section,
+        } => {
+            config::cmd_show(path.as_deref(), &format, section.as_deref())?;
+        }
+        ConfigAction::Init { path, force } => {
+            config::cmd_init(path.as_deref(), force)?;
+        }
+        ConfigAction::Validate { path } => {
+            config::cmd_validate(path.as_deref())?;
+        }
+        ConfigAction::Get { key, path } => {
+            config::cmd_get(&key, path.as_deref())?;
+        }
+        ConfigAction::Set { key, value, path } => {
+            config::cmd_set(&key, &value, path.as_deref())?;
         }
     }
 
@@ -551,6 +957,7 @@ async fn execute_admin_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap_complete::Shell;
 
     #[test]
     fn test_cli_parsing() {
@@ -563,5 +970,374 @@ mod tests {
         assert!(OutputFormat::from_str("json").is_some());
         assert!(OutputFormat::from_str("table").is_some());
         assert!(OutputFormat::from_str("invalid").is_none());
+    }
+
+    /// Helper: generate completions for a given shell into a buffer.
+    fn generate_to_buf(shell: Shell) -> Vec<u8> {
+        let mut buf = Vec::new();
+        clap_complete::generate(shell, &mut Cli::command(), "amaters-cli", &mut buf);
+        buf
+    }
+
+    // --- Completion tests (10+) ---
+
+    #[test]
+    fn test_completions_bash() {
+        let buf = generate_to_buf(Shell::Bash);
+        assert!(!buf.is_empty(), "Bash completions should not be empty");
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.contains("amaters-cli"),
+            "Bash completions should reference the binary name"
+        );
+    }
+
+    #[test]
+    fn test_completions_zsh() {
+        let buf = generate_to_buf(Shell::Zsh);
+        assert!(!buf.is_empty(), "Zsh completions should not be empty");
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.contains("amaters-cli"),
+            "Zsh completions should reference the binary name"
+        );
+    }
+
+    #[test]
+    fn test_completions_fish() {
+        let buf = generate_to_buf(Shell::Fish);
+        assert!(!buf.is_empty(), "Fish completions should not be empty");
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.contains("amaters-cli"),
+            "Fish completions should reference the binary name"
+        );
+    }
+
+    #[test]
+    fn test_completions_powershell() {
+        let buf = generate_to_buf(Shell::PowerShell);
+        assert!(
+            !buf.is_empty(),
+            "PowerShell completions should not be empty"
+        );
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.contains("amaters-cli"),
+            "PowerShell completions should reference the binary name"
+        );
+    }
+
+    #[test]
+    fn test_completions_elvish() {
+        let buf = generate_to_buf(Shell::Elvish);
+        assert!(!buf.is_empty(), "Elvish completions should not be empty");
+    }
+
+    #[test]
+    fn test_completions_to_file() {
+        let dir = std::env::temp_dir().join("amaters_test_completions_to_file");
+        let _ = std::fs::create_dir_all(&dir);
+        let file_path = dir.join("amaters-cli.bash");
+
+        let result = generate_completions(Shell::Bash, Some(file_path.clone()));
+        assert!(
+            result.is_ok(),
+            "generate_completions to file should succeed"
+        );
+
+        let content =
+            std::fs::read_to_string(&file_path).expect("completion file should be readable");
+        assert!(
+            !content.is_empty(),
+            "Written completion file should not be empty"
+        );
+        assert!(
+            content.contains("amaters-cli"),
+            "Written completion file should contain binary name"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_completions_contains_subcommands() {
+        let buf = generate_to_buf(Shell::Bash);
+        let text = String::from_utf8_lossy(&buf);
+        // The completion script should reference known subcommands
+        for subcmd in &["set", "get", "delete", "completions", "interactive"] {
+            assert!(
+                text.contains(subcmd),
+                "Bash completions should contain subcommand '{subcmd}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_completions_contains_flags() {
+        let buf = generate_to_buf(Shell::Bash);
+        let text = String::from_utf8_lossy(&buf);
+        for flag in &["--help", "--version"] {
+            assert!(
+                text.contains(flag),
+                "Bash completions should contain flag '{flag}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_completions_binary_name() {
+        // Verify that all shells use the correct binary name
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::PowerShell] {
+            let buf = generate_to_buf(shell);
+            let text = String::from_utf8_lossy(&buf);
+            assert!(
+                text.contains("amaters-cli"),
+                "Completions for {shell:?} must contain binary name 'amaters-cli'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_completions_overwrite_file() {
+        let dir = std::env::temp_dir().join("amaters_test_completions_overwrite");
+        let _ = std::fs::create_dir_all(&dir);
+        let file_path = dir.join("amaters-cli.zsh");
+
+        // Write once
+        let r1 = generate_completions(Shell::Zsh, Some(file_path.clone()));
+        assert!(r1.is_ok(), "First write should succeed");
+        let content1 = std::fs::read(&file_path).expect("should read first write");
+
+        // Write again (overwrite)
+        let r2 = generate_completions(Shell::Zsh, Some(file_path.clone()));
+        assert!(r2.is_ok(), "Second write (overwrite) should succeed");
+        let content2 = std::fs::read(&file_path).expect("should read second write");
+
+        assert_eq!(
+            content1, content2,
+            "Overwritten file should have same content"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_completions_cli_integration() {
+        // Parse the completions subcommand through clap
+        let result = Cli::try_parse_from(["amaters-cli", "completions", "bash"]);
+        assert!(result.is_ok(), "Parsing 'completions bash' should succeed");
+        let cli = result.expect("already asserted Ok");
+        match cli.command {
+            Commands::Completions { shell, output } => {
+                assert_eq!(shell, Shell::Bash);
+                assert!(output.is_none());
+            }
+            _ => panic!("Expected Completions command"),
+        }
+    }
+
+    #[test]
+    fn test_completions_cli_with_output_flag() {
+        let result = Cli::try_parse_from([
+            "amaters-cli",
+            "completions",
+            "fish",
+            "--output",
+            "/tmp/test.fish",
+        ]);
+        assert!(
+            result.is_ok(),
+            "Parsing 'completions fish --output ...' should succeed"
+        );
+        let cli = result.expect("already asserted Ok");
+        match cli.command {
+            Commands::Completions { shell, output } => {
+                assert_eq!(shell, Shell::Fish);
+                assert_eq!(output, Some(PathBuf::from("/tmp/test.fish")));
+            }
+            _ => panic!("Expected Completions command"),
+        }
+    }
+
+    #[test]
+    fn test_completions_creates_parent_dirs() {
+        let dir = std::env::temp_dir()
+            .join("amaters_test_parent_dirs")
+            .join("nested")
+            .join("deeply");
+        let file_path = dir.join("comp.bash");
+
+        // Ensure the directory does not already exist
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("amaters_test_parent_dirs"));
+
+        let result = generate_completions(Shell::Bash, Some(file_path.clone()));
+        assert!(
+            result.is_ok(),
+            "Should create parent directories automatically"
+        );
+        assert!(
+            file_path.exists(),
+            "Completion file should exist after generation"
+        );
+
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("amaters_test_parent_dirs"));
+    }
+
+    #[test]
+    fn test_completions_invalid_shell_rejected() {
+        let result = Cli::try_parse_from(["amaters-cli", "completions", "invalid_shell"]);
+        assert!(
+            result.is_err(),
+            "An invalid shell name should be rejected by clap"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // E1: Pagination flag tests
+    // -----------------------------------------------------------------------
+
+    /// Parsing `range --limit 10` should produce a `PaginationConfig` with `page_size == 10`.
+    #[test]
+    fn test_pagination_limit_respected() {
+        let cli = Cli::try_parse_from(["amaters-cli", "range", "start", "end", "--limit", "10"])
+            .expect("parse should succeed");
+
+        match cli.command {
+            Commands::Range {
+                limit,
+                offset,
+                cursor,
+                ..
+            } => {
+                assert_eq!(limit, Some(10));
+                assert_eq!(offset, None);
+                assert_eq!(cursor, None);
+
+                // Verify build_pagination maps to PaginationConfig correctly.
+                let pag = build_pagination(limit, offset, cursor);
+                assert_eq!(pag.page_size, 10);
+                assert_eq!(pag.offset, 0);
+                assert!(pag.cursor.is_none());
+            }
+            _ => panic!("Expected Range command"),
+        }
+    }
+
+    /// Parsing `range --offset 5 --cursor tok` should reflect in PaginationConfig.
+    #[test]
+    fn test_pagination_offset_and_cursor() {
+        let cli = Cli::try_parse_from([
+            "amaters-cli",
+            "range",
+            "start",
+            "end",
+            "--offset",
+            "5",
+            "--cursor",
+            "tok123",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Commands::Range {
+                limit,
+                offset,
+                cursor,
+                ..
+            } => {
+                let pag = build_pagination(limit, offset, cursor);
+                assert_eq!(pag.offset, 5);
+                assert_eq!(pag.cursor.as_deref(), Some("tok123"));
+            }
+            _ => panic!("Expected Range command"),
+        }
+    }
+
+    /// `scan --limit 20` should parse correctly.
+    #[test]
+    fn test_scan_pagination_flags() {
+        let cli = Cli::try_parse_from([
+            "amaters-cli",
+            "scan",
+            "prefix:",
+            "--limit",
+            "20",
+            "--offset",
+            "0",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Commands::Scan {
+                limit,
+                offset,
+                cursor,
+                ..
+            } => {
+                assert_eq!(limit, Some(20));
+                assert_eq!(offset, Some(0));
+                assert!(cursor.is_none());
+            }
+            _ => panic!("Expected Scan command"),
+        }
+    }
+
+    /// `print_paginated_result` with a next cursor should include "Next cursor:" in table output.
+    #[test]
+    fn test_pagination_cursor_output_format() {
+        // Capture is not straightforward in unit tests; we just verify the
+        // function does not panic and returns Ok when a next cursor is present.
+        let result = output::print_paginated_result(&[], Some("cursor_abc"), OutputFormat::Table);
+        assert!(result.is_ok(), "print_paginated_result should succeed");
+    }
+
+    // -----------------------------------------------------------------------
+    // E3: Watch mode tests
+    // -----------------------------------------------------------------------
+
+    /// Parsing the `watch` subcommand should succeed and extract interval and args.
+    #[test]
+    fn test_watch_cli_parsing() {
+        let cli = Cli::try_parse_from(["amaters-cli", "watch", "5", "server", "status"])
+            .expect("parse should succeed");
+
+        match cli.command {
+            Commands::Watch {
+                interval_secs,
+                args,
+            } => {
+                assert_eq!(interval_secs, 5);
+                assert_eq!(args, vec!["server", "status"]);
+            }
+            _ => panic!("Expected Watch command"),
+        }
+    }
+
+    /// `watch_loop` should invoke the closure at least twice within 150 ms at a 50 ms interval.
+    #[tokio::test]
+    async fn test_watch_executes_at_least_twice() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        let interval = std::time::Duration::from_millis(50);
+        let deadline = std::time::Duration::from_millis(150);
+
+        let loop_fut = watch_loop(interval, move || {
+            let c = counter_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                true // keep going
+            })
+        });
+
+        // Run for ~150 ms then drop the future (cancel).
+        let _ = tokio::time::timeout(deadline, loop_fut).await;
+
+        let count = counter.load(Ordering::SeqCst);
+        assert!(count >= 2, "expected >= 2 ticks, got {count}");
     }
 }

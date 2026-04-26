@@ -4,6 +4,7 @@
 //! They store memtable snapshots persistently with efficient read access.
 
 use crate::error::{AmateRSError, ErrorContext, Result};
+use crate::storage::compression::{self, CompressionType};
 use crate::storage::{BloomFilter, BloomFilterConfig, BloomFilterMetadata};
 use crate::types::{CipherBlob, Key};
 use crate::utils::{calculate_checksum, verify_checksum};
@@ -17,7 +18,7 @@ use std::sync::Arc;
 const SSTABLE_MAGIC: u32 = 0x53535441;
 
 /// SSTable format version
-const SSTABLE_VERSION: u32 = 2; // Version 2 adds bloom filters
+const SSTABLE_VERSION: u32 = 3; // Version 3 adds block compression
 
 /// Default block size (4KB)
 const DEFAULT_BLOCK_SIZE: usize = 4096;
@@ -25,17 +26,17 @@ const DEFAULT_BLOCK_SIZE: usize = 4096;
 /// SSTable configuration
 #[derive(Debug, Clone)]
 pub struct SSTableConfig {
-    /// Block size in bytes
+    /// Block size in bytes (uncompressed target size)
     pub block_size: usize,
-    /// Enable compression (future feature)
-    pub enable_compression: bool,
+    /// Compression algorithm for data blocks
+    pub compression_type: CompressionType,
 }
 
 impl Default for SSTableConfig {
     fn default() -> Self {
         Self {
             block_size: DEFAULT_BLOCK_SIZE,
-            enable_compression: false,
+            compression_type: CompressionType::None,
         }
     }
 }
@@ -182,6 +183,9 @@ impl DataBlock {
     }
 }
 
+/// Footer size in bytes
+const FOOTER_SIZE: usize = 37;
+
 /// SSTable footer containing metadata
 #[derive(Debug, Clone)]
 struct Footer {
@@ -191,11 +195,18 @@ struct Footer {
     bloom_filter_offset: u64,
     block_size: u32,
     num_blocks: u32,
+    compression_type: CompressionType,
     checksum: u32,
 }
 
 impl Footer {
-    fn new(index_offset: u64, bloom_filter_offset: u64, block_size: u32, num_blocks: u32) -> Self {
+    fn new(
+        index_offset: u64,
+        bloom_filter_offset: u64,
+        block_size: u32,
+        num_blocks: u32,
+        compression_type: CompressionType,
+    ) -> Self {
         let mut footer = Self {
             magic: SSTABLE_MAGIC,
             version: SSTABLE_VERSION,
@@ -203,36 +214,41 @@ impl Footer {
             bloom_filter_offset,
             block_size,
             num_blocks,
+            compression_type,
             checksum: 0,
         };
 
-        // Calculate checksum of footer (excluding checksum field)
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&footer.magic.to_le_bytes());
-        bytes.extend_from_slice(&footer.version.to_le_bytes());
-        bytes.extend_from_slice(&footer.index_offset.to_le_bytes());
-        bytes.extend_from_slice(&footer.bloom_filter_offset.to_le_bytes());
-        bytes.extend_from_slice(&footer.block_size.to_le_bytes());
-        bytes.extend_from_slice(&footer.num_blocks.to_le_bytes());
-        footer.checksum = calculate_checksum(&bytes);
-
+        footer.checksum = footer.compute_checksum();
         footer
     }
 
-    fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(36);
+    fn compute_checksum(&self) -> u32 {
+        let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.magic.to_le_bytes());
         bytes.extend_from_slice(&self.version.to_le_bytes());
         bytes.extend_from_slice(&self.index_offset.to_le_bytes());
         bytes.extend_from_slice(&self.bloom_filter_offset.to_le_bytes());
         bytes.extend_from_slice(&self.block_size.to_le_bytes());
         bytes.extend_from_slice(&self.num_blocks.to_le_bytes());
+        bytes.push(self.compression_type.to_byte());
+        calculate_checksum(&bytes)
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(FOOTER_SIZE);
+        bytes.extend_from_slice(&self.magic.to_le_bytes());
+        bytes.extend_from_slice(&self.version.to_le_bytes());
+        bytes.extend_from_slice(&self.index_offset.to_le_bytes());
+        bytes.extend_from_slice(&self.bloom_filter_offset.to_le_bytes());
+        bytes.extend_from_slice(&self.block_size.to_le_bytes());
+        bytes.extend_from_slice(&self.num_blocks.to_le_bytes());
+        bytes.push(self.compression_type.to_byte());
         bytes.extend_from_slice(&self.checksum.to_le_bytes());
         bytes
     }
 
     fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 36 {
+        if bytes.len() < FOOTER_SIZE {
             return Err(AmateRSError::StorageIntegrity(ErrorContext::new(
                 "Footer too small".to_string(),
             )));
@@ -248,7 +264,8 @@ impl Footer {
         ]);
         let block_size = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
         let num_blocks = u32::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]);
-        let checksum = u32::from_le_bytes([bytes[32], bytes[33], bytes[34], bytes[35]]);
+        let compression_type = CompressionType::from_byte(bytes[32])?;
+        let checksum = u32::from_le_bytes([bytes[33], bytes[34], bytes[35], bytes[36]]);
 
         if magic != SSTABLE_MAGIC {
             return Err(AmateRSError::StorageIntegrity(ErrorContext::new(format!(
@@ -264,25 +281,27 @@ impl Footer {
             ))));
         }
 
-        // Verify checksum
-        let mut verify_bytes = Vec::new();
-        verify_bytes.extend_from_slice(&magic.to_le_bytes());
-        verify_bytes.extend_from_slice(&version.to_le_bytes());
-        verify_bytes.extend_from_slice(&index_offset.to_le_bytes());
-        verify_bytes.extend_from_slice(&bloom_filter_offset.to_le_bytes());
-        verify_bytes.extend_from_slice(&block_size.to_le_bytes());
-        verify_bytes.extend_from_slice(&num_blocks.to_le_bytes());
-        verify_checksum(&verify_bytes, checksum)?;
-
-        Ok(Self {
+        let footer = Self {
             magic,
             version,
             index_offset,
             bloom_filter_offset,
             block_size,
             num_blocks,
+            compression_type,
             checksum,
-        })
+        };
+
+        // Verify checksum
+        let expected = footer.compute_checksum();
+        if checksum != expected {
+            return Err(AmateRSError::StorageIntegrity(ErrorContext::new(format!(
+                "Footer checksum mismatch: expected {}, got {}",
+                expected, checksum
+            ))));
+        }
+
+        Ok(footer)
     }
 }
 
@@ -355,6 +374,14 @@ impl SSTableWriter {
     }
 
     /// Flush current block to disk
+    ///
+    /// Block on-disk format (with compression):
+    /// ```text
+    /// [original_size: 4 bytes LE][compressed_size: 4 bytes LE][compressed_data: N bytes]
+    /// ```
+    ///
+    /// When compression is `None`, `compressed_data` is the raw encoded block
+    /// and `original_size == compressed_size`.
     fn flush_block(&mut self) -> Result<()> {
         if self.current_block.entries.is_empty() {
             return Ok(());
@@ -367,14 +394,37 @@ impl SSTableWriter {
         })?;
 
         let block_bytes = self.current_block.encode()?;
-        writer.write_all(&block_bytes).map_err(|e| {
+        let original_size = block_bytes.len() as u32;
+
+        let compressed = compression::compress_block(&block_bytes, self.config.compression_type)?;
+        let compressed_size = compressed.len() as u32;
+
+        // Write block envelope: original_size + compressed_size + data
+        writer
+            .write_all(&original_size.to_le_bytes())
+            .map_err(|e| {
+                AmateRSError::StorageIntegrity(ErrorContext::new(format!(
+                    "Failed to write block original size: {}",
+                    e
+                )))
+            })?;
+        writer
+            .write_all(&compressed_size.to_le_bytes())
+            .map_err(|e| {
+                AmateRSError::StorageIntegrity(ErrorContext::new(format!(
+                    "Failed to write block compressed size: {}",
+                    e
+                )))
+            })?;
+        writer.write_all(&compressed).map_err(|e| {
             AmateRSError::StorageIntegrity(ErrorContext::new(format!(
-                "Failed to write block: {}",
+                "Failed to write compressed block: {}",
                 e
             )))
         })?;
 
-        self.current_offset += block_bytes.len() as u64;
+        // 8 bytes header + compressed data
+        self.current_offset += 8 + compressed.len() as u64;
         self.current_block = DataBlock::new();
 
         Ok(())
@@ -446,6 +496,7 @@ impl SSTableWriter {
             bloom_filter_offset,
             self.config.block_size as u32,
             self.index.len() as u32,
+            self.config.compression_type,
         );
         let footer_bytes = footer.encode();
         writer.write_all(&footer_bytes).map_err(|e| {
@@ -477,6 +528,7 @@ pub struct SSTableReader {
     footer: Footer,
     index: Vec<IndexEntry>,
     bloom_filter: BloomFilter,
+    compression_type: CompressionType,
 }
 
 impl SSTableReader {
@@ -500,21 +552,23 @@ impl SSTableReader {
             })?
             .len();
 
-        if file_size < 36 {
+        if file_size < FOOTER_SIZE as u64 {
             return Err(AmateRSError::StorageIntegrity(ErrorContext::new(
                 "SSTable file too small".to_string(),
             )));
         }
 
         let mut reader = BufReader::new(&file);
-        reader.seek(SeekFrom::End(-36)).map_err(|e| {
-            AmateRSError::StorageIntegrity(ErrorContext::new(format!(
-                "Failed to seek to footer: {}",
-                e
-            )))
-        })?;
+        reader
+            .seek(SeekFrom::End(-(FOOTER_SIZE as i64)))
+            .map_err(|e| {
+                AmateRSError::StorageIntegrity(ErrorContext::new(format!(
+                    "Failed to seek to footer: {}",
+                    e
+                )))
+            })?;
 
-        let mut footer_bytes = [0u8; 36];
+        let mut footer_bytes = [0u8; FOOTER_SIZE];
         reader.read_exact(&mut footer_bytes).map_err(|e| {
             AmateRSError::StorageIntegrity(ErrorContext::new(format!(
                 "Failed to read footer: {}",
@@ -616,7 +670,7 @@ impl SSTableReader {
         let bloom_metadata = BloomFilterMetadata::from_bytes(&metadata_bytes)?;
 
         // Read bloom filter data
-        let bloom_size = (bloom_metadata.num_bits + 7) / 8;
+        let bloom_size = bloom_metadata.num_bits.div_ceil(8);
         let mut bloom_data = vec![0u8; bloom_size];
         reader.read_exact(&mut bloom_data).map_err(|e| {
             AmateRSError::StorageIntegrity(ErrorContext::new(format!(
@@ -632,12 +686,15 @@ impl SSTableReader {
             bloom_metadata.num_elements,
         )?;
 
+        let compression_type = footer.compression_type;
+
         Ok(Self {
             path: path.as_ref().to_path_buf(),
             file: Arc::new(file),
             footer,
             index,
             bloom_filter,
+            compression_type,
         })
     }
 
@@ -688,7 +745,12 @@ impl SSTableReader {
         }
     }
 
-    /// Read a block from disk
+    /// Read a block from disk, decompressing if necessary
+    ///
+    /// On-disk format per block:
+    /// ```text
+    /// [original_size: 4 bytes LE][compressed_size: 4 bytes LE][compressed_data: N bytes]
+    /// ```
     fn read_block(&self, block_index: usize) -> Result<DataBlock> {
         if block_index >= self.index.len() {
             return Err(AmateRSError::StorageIntegrity(ErrorContext::new(
@@ -697,14 +759,6 @@ impl SSTableReader {
         }
 
         let offset = self.index[block_index].offset;
-        let next_offset = if block_index + 1 < self.index.len() {
-            self.index[block_index + 1].offset
-        } else {
-            self.footer.index_offset
-        };
-
-        let block_size = (next_offset - offset) as usize;
-        let mut block_bytes = vec![0u8; block_size];
 
         let mut reader = BufReader::new(self.file.as_ref());
         reader.seek(SeekFrom::Start(offset)).map_err(|e| {
@@ -714,12 +768,32 @@ impl SSTableReader {
             )))
         })?;
 
-        reader.read_exact(&mut block_bytes).map_err(|e| {
+        // Read block envelope header (8 bytes)
+        let mut header = [0u8; 8];
+        reader.read_exact(&mut header).map_err(|e| {
             AmateRSError::StorageIntegrity(ErrorContext::new(format!(
-                "Failed to read block: {}",
+                "Failed to read block header: {}",
                 e
             )))
         })?;
+
+        let original_size =
+            u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let compressed_size =
+            u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+
+        // Read compressed data
+        let mut compressed_data = vec![0u8; compressed_size];
+        reader.read_exact(&mut compressed_data).map_err(|e| {
+            AmateRSError::StorageIntegrity(ErrorContext::new(format!(
+                "Failed to read compressed block data: {}",
+                e
+            )))
+        })?;
+
+        // Decompress
+        let block_bytes =
+            compression::decompress_block(&compressed_data, self.compression_type, original_size)?;
 
         DataBlock::decode(&block_bytes)
     }
@@ -835,7 +909,7 @@ mod tests {
         {
             let config = SSTableConfig {
                 block_size: 256,
-                enable_compression: false,
+                compression_type: CompressionType::None,
             };
             let mut writer = SSTableWriter::new(&path, config)?;
 
@@ -999,6 +1073,375 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
 
+        Ok(())
+    }
+
+    /// Helper to write and read back an SSTable with the given compression type
+    fn write_read_roundtrip(
+        filename: &str,
+        compression_type: CompressionType,
+        num_entries: usize,
+        value_size: usize,
+        block_size: usize,
+    ) -> Result<()> {
+        let dir = env::temp_dir();
+        let path = dir.join(filename);
+
+        // Write
+        {
+            let config = SSTableConfig {
+                block_size,
+                compression_type,
+            };
+            let mut writer = SSTableWriter::new(&path, config)?;
+
+            for i in 0..num_entries {
+                let key = Key::from_str(&format!("key_{:06}", i));
+                // Create somewhat compressible data (repeated byte patterns)
+                let mut value_data = Vec::with_capacity(value_size);
+                for j in 0..value_size {
+                    value_data.push(((i + j) % 256) as u8);
+                }
+                let value = CipherBlob::new(value_data);
+                writer.add(key, value)?;
+            }
+
+            writer.finish()?;
+        }
+
+        // Read and verify
+        {
+            let reader = SSTableReader::open(&path)?;
+
+            for i in 0..num_entries {
+                let key = Key::from_str(&format!("key_{:06}", i));
+                let value = reader.get(&key)?.ok_or_else(|| {
+                    AmateRSError::StorageIntegrity(ErrorContext::new(format!(
+                        "Missing key {} with {:?} compression",
+                        i, compression_type
+                    )))
+                })?;
+
+                assert_eq!(value.as_bytes().len(), value_size);
+                for j in 0..value_size {
+                    assert_eq!(
+                        value.as_bytes()[j],
+                        ((i + j) % 256) as u8,
+                        "Value mismatch at key={}, byte={}",
+                        i,
+                        j
+                    );
+                }
+            }
+
+            // Verify non-existent key
+            let missing = Key::from_str("nonexistent_key");
+            assert!(reader.get(&missing)?.is_none());
+
+            // Verify iteration
+            let entries = reader.iter()?;
+            assert_eq!(entries.len(), num_entries);
+        }
+
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_sstable_compressed_lz4_basic() -> Result<()> {
+        write_read_roundtrip(
+            "test_sstable_lz4_basic.sst",
+            CompressionType::Lz4,
+            20,
+            200,
+            DEFAULT_BLOCK_SIZE,
+        )
+    }
+
+    #[test]
+    fn test_sstable_compressed_deflate_basic() -> Result<()> {
+        write_read_roundtrip(
+            "test_sstable_deflate_basic.sst",
+            CompressionType::Deflate,
+            20,
+            200,
+            DEFAULT_BLOCK_SIZE,
+        )
+    }
+
+    #[test]
+    fn test_sstable_compressed_lz4_multiple_blocks() -> Result<()> {
+        write_read_roundtrip(
+            "test_sstable_lz4_multiblock.sst",
+            CompressionType::Lz4,
+            100,
+            100,
+            256, // Small block size forces many blocks
+        )
+    }
+
+    #[test]
+    fn test_sstable_compressed_deflate_multiple_blocks() -> Result<()> {
+        write_read_roundtrip(
+            "test_sstable_deflate_multiblock.sst",
+            CompressionType::Deflate,
+            100,
+            100,
+            256,
+        )
+    }
+
+    #[test]
+    fn test_sstable_compression_ratio() -> Result<()> {
+        let dir = env::temp_dir();
+        let path_none = dir.join("test_sstable_ratio_none.sst");
+        let path_lz4 = dir.join("test_sstable_ratio_lz4.sst");
+        let path_deflate = dir.join("test_sstable_ratio_deflate.sst");
+
+        // Write highly compressible data (repeated patterns)
+        let num_entries = 200;
+        let value_size = 500;
+
+        for (path, ct) in [
+            (&path_none, CompressionType::None),
+            (&path_lz4, CompressionType::Lz4),
+            (&path_deflate, CompressionType::Deflate),
+        ] {
+            let config = SSTableConfig {
+                block_size: DEFAULT_BLOCK_SIZE,
+                compression_type: ct,
+            };
+            let mut writer = SSTableWriter::new(path, config)?;
+
+            for i in 0..num_entries {
+                let key = Key::from_str(&format!("key_{:06}", i));
+                // Highly repetitive data
+                let value = CipherBlob::new(vec![(i % 10) as u8; value_size]);
+                writer.add(key, value)?;
+            }
+
+            writer.finish()?;
+        }
+
+        let size_none = std::fs::metadata(&path_none)
+            .map_err(|e| {
+                AmateRSError::StorageIntegrity(ErrorContext::new(format!(
+                    "Failed to get file size: {}",
+                    e
+                )))
+            })?
+            .len();
+        let size_lz4 = std::fs::metadata(&path_lz4)
+            .map_err(|e| {
+                AmateRSError::StorageIntegrity(ErrorContext::new(format!(
+                    "Failed to get file size: {}",
+                    e
+                )))
+            })?
+            .len();
+        let size_deflate = std::fs::metadata(&path_deflate)
+            .map_err(|e| {
+                AmateRSError::StorageIntegrity(ErrorContext::new(format!(
+                    "Failed to get file size: {}",
+                    e
+                )))
+            })?
+            .len();
+
+        // Compressed files should be smaller than uncompressed
+        assert!(
+            size_lz4 < size_none,
+            "LZ4 ({}) should be smaller than None ({})",
+            size_lz4,
+            size_none
+        );
+        assert!(
+            size_deflate < size_none,
+            "Deflate ({}) should be smaller than None ({})",
+            size_deflate,
+            size_none
+        );
+
+        // Verify all three can be read back correctly
+        for path in [&path_none, &path_lz4, &path_deflate] {
+            let reader = SSTableReader::open(path)?;
+            let entries = reader.iter()?;
+            assert_eq!(entries.len(), num_entries);
+        }
+
+        std::fs::remove_file(&path_none).ok();
+        std::fs::remove_file(&path_lz4).ok();
+        std::fs::remove_file(&path_deflate).ok();
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sstable_large_block_compression() -> Result<()> {
+        // 64KB block with large values
+        write_read_roundtrip(
+            "test_sstable_large_block_comp.sst",
+            CompressionType::Lz4,
+            10,
+            10000,
+            65536,
+        )
+    }
+
+    #[test]
+    fn test_sstable_compressed_empty() -> Result<()> {
+        let dir = env::temp_dir();
+
+        for ct in [CompressionType::Lz4, CompressionType::Deflate] {
+            let filename = format!("test_sstable_empty_{:?}.sst", ct);
+            let path = dir.join(&filename);
+
+            {
+                let config = SSTableConfig {
+                    block_size: DEFAULT_BLOCK_SIZE,
+                    compression_type: ct,
+                };
+                let writer = SSTableWriter::new(&path, config)?;
+                writer.finish()?;
+            }
+
+            {
+                let reader = SSTableReader::open(&path)?;
+                let entries = reader.iter()?;
+                assert_eq!(entries.len(), 0);
+
+                let key = Key::from_str("any_key");
+                assert!(reader.get(&key)?.is_none());
+            }
+
+            std::fs::remove_file(&path).ok();
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sstable_compressed_iteration_order() -> Result<()> {
+        let dir = env::temp_dir();
+        let path = dir.join("test_sstable_comp_iter_order.sst");
+
+        {
+            let config = SSTableConfig {
+                block_size: 256,
+                compression_type: CompressionType::Deflate,
+            };
+            let mut writer = SSTableWriter::new(&path, config)?;
+
+            for i in 0..50 {
+                let key = Key::from_str(&format!("key_{:06}", i));
+                let value = CipherBlob::new(vec![i as u8; 100]);
+                writer.add(key, value)?;
+            }
+
+            writer.finish()?;
+        }
+
+        {
+            let reader = SSTableReader::open(&path)?;
+            let entries = reader.iter()?;
+
+            assert_eq!(entries.len(), 50);
+
+            // Verify sorted order is preserved through compression
+            for i in 0..49 {
+                assert!(
+                    entries[i].0 < entries[i + 1].0,
+                    "Order violation at index {}",
+                    i
+                );
+            }
+        }
+
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_sstable_compressed_metadata() -> Result<()> {
+        let dir = env::temp_dir();
+        let path = dir.join("test_sstable_comp_metadata.sst");
+
+        {
+            let config = SSTableConfig {
+                block_size: DEFAULT_BLOCK_SIZE,
+                compression_type: CompressionType::Lz4,
+            };
+            let mut writer = SSTableWriter::new(&path, config)?;
+
+            for i in 0..25 {
+                let key = Key::from_str(&format!("key_{:06}", i));
+                let value = CipherBlob::new(vec![i as u8; 50]);
+                writer.add(key, value)?;
+            }
+
+            writer.finish()?;
+        }
+
+        {
+            let reader = SSTableReader::open(&path)?;
+            let (min_key, max_key, count) = reader.metadata()?;
+
+            assert_eq!(min_key, Key::from_str("key_000000"));
+            assert_eq!(max_key, Key::from_str("key_000024"));
+            assert_eq!(count, 25);
+        }
+
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_sstable_compressed_bloom_filter() -> Result<()> {
+        let dir = env::temp_dir();
+        let path = dir.join("test_sstable_comp_bloom.sst");
+
+        {
+            let config = SSTableConfig {
+                block_size: DEFAULT_BLOCK_SIZE,
+                compression_type: CompressionType::Deflate,
+            };
+            let mut writer = SSTableWriter::new(&path, config)?;
+
+            for i in 0..100 {
+                let key = Key::from_str(&format!("existing_{:06}", i));
+                let value = CipherBlob::new(vec![i as u8; 30]);
+                writer.add(key, value)?;
+            }
+
+            writer.finish()?;
+        }
+
+        {
+            let reader = SSTableReader::open(&path)?;
+
+            // Existing keys should pass bloom filter
+            for i in 0..100 {
+                let key = Key::from_str(&format!("existing_{:06}", i));
+                assert!(reader.may_contain(&key));
+            }
+
+            // Non-existent keys should mostly be rejected (bloom filter may have FPs)
+            let mut rejected = 0;
+            for i in 0..1000 {
+                let key = Key::from_str(&format!("missing_{:06}", i));
+                if !reader.may_contain(&key) {
+                    rejected += 1;
+                }
+            }
+            // With 1% FP rate, at least 900 of 1000 should be rejected
+            assert!(
+                rejected > 900,
+                "Bloom filter rejected only {} of 1000 non-existent keys",
+                rejected
+            );
+        }
+
+        std::fs::remove_file(&path).ok();
         Ok(())
     }
 }

@@ -69,6 +69,14 @@ pub enum AmateRSError {
     /// Deserialization error (decoding failed)
     #[error("{0}")]
     Deserialization(ErrorContext),
+
+    /// GPU error (device detection, execution, resource management)
+    #[error("{0}")]
+    GpuError(ErrorContext),
+
+    /// Configuration error (general)
+    #[error("{0}")]
+    Configuration(ErrorContext),
 }
 
 /// Rich error context with location tracking and metadata

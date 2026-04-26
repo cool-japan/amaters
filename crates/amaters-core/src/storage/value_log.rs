@@ -7,16 +7,21 @@
 //! Key features:
 //! - Sequential append-only writes for high throughput
 //! - File rotation when files reach size threshold
-//! - Garbage collection to reclaim space from dead values
+//! - Garbage collection to reclaim space from dead values (see `value_log_gc`)
 //! - Value pointers stored in LSM-Tree for indirection
 
 use crate::error::{AmateRSError, ErrorContext, Result};
 use crate::types::{CipherBlob, Key};
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+// Re-export GC types for backward compatibility
+pub use super::value_log_gc::{GcConfig, GcResult, GcStats, SegmentStats};
 
 /// Value pointer for referencing values in the vLog
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,17 +118,17 @@ impl Default for ValueLogConfig {
 }
 
 /// Value log entry
-struct VLogEntry {
+pub(crate) struct VLogEntry {
     /// Key (for GC to identify ownership)
-    key: Key,
+    pub(crate) key: Key,
     /// Value data
-    value: CipherBlob,
+    pub(crate) value: CipherBlob,
     /// CRC32 checksum
-    checksum: u32,
+    pub(crate) checksum: u32,
 }
 
 impl VLogEntry {
-    fn new(key: Key, value: CipherBlob) -> Self {
+    pub(crate) fn new(key: Key, value: CipherBlob) -> Self {
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(key.as_bytes());
         hasher.update(value.as_bytes());
@@ -136,7 +141,7 @@ impl VLogEntry {
         }
     }
 
-    fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
         // Magic number (0x564C4F47 = "VLOG" in hex)
@@ -225,15 +230,25 @@ impl VLogEntry {
 /// Value log for storing large values
 pub struct ValueLog {
     /// Configuration
-    config: ValueLogConfig,
+    pub(crate) config: ValueLogConfig,
+    /// GC configuration
+    pub(crate) gc_config: GcConfig,
     /// Current vLog file number
-    current_file_id: Arc<RwLock<u64>>,
+    pub(crate) current_file_id: Arc<RwLock<u64>>,
     /// Current file writer
-    writer: Arc<RwLock<BufWriter<File>>>,
+    pub(crate) writer: Arc<RwLock<std::io::BufWriter<File>>>,
     /// Current file offset
-    current_offset: Arc<RwLock<u64>>,
+    pub(crate) current_offset: Arc<RwLock<u64>>,
     /// Current file size
-    current_size: Arc<RwLock<u64>>,
+    pub(crate) current_size: Arc<RwLock<u64>>,
+    /// Per-segment statistics
+    pub(crate) segment_stats: Arc<DashMap<u64, SegmentStats>>,
+    /// Whether GC is currently running
+    pub(crate) gc_running: Arc<AtomicBool>,
+    /// Active readers count per segment (prevents deletion during reads)
+    pub(crate) segment_readers: Arc<DashMap<u64, Arc<RwLock<()>>>>,
+    /// Timestamp (millis since UNIX epoch) of the last write operation
+    pub(crate) last_write_time: Arc<AtomicU64>,
 }
 
 impl ValueLog {
@@ -248,6 +263,11 @@ impl ValueLog {
 
     /// Create a new value log with custom configuration
     pub fn with_config(config: ValueLogConfig) -> Result<Self> {
+        Self::with_config_and_gc(config, GcConfig::default())
+    }
+
+    /// Create a new value log with custom configuration and GC configuration
+    pub fn with_config_and_gc(config: ValueLogConfig, gc_config: GcConfig) -> Result<Self> {
         // Create vLog directory
         std::fs::create_dir_all(&config.vlog_dir).map_err(|e| {
             AmateRSError::IoError(ErrorContext::new(format!(
@@ -278,12 +298,32 @@ impl ValueLog {
             })?
             .len();
 
+        let segment_stats = Arc::new(DashMap::new());
+        // Initialize stats for the current segment
+        let mut initial_stats = SegmentStats::new();
+        initial_stats.total_bytes = current_size;
+        initial_stats.live_bytes = current_size;
+        segment_stats.insert(file_id, initial_stats);
+
+        let segment_readers = Arc::new(DashMap::new());
+        segment_readers.insert(file_id, Arc::new(RwLock::new(())));
+
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
         Ok(Self {
             config,
+            gc_config,
             current_file_id: Arc::new(RwLock::new(file_id)),
-            writer: Arc::new(RwLock::new(BufWriter::new(file))),
+            writer: Arc::new(RwLock::new(std::io::BufWriter::new(file))),
             current_offset: Arc::new(RwLock::new(current_size)),
             current_size: Arc::new(RwLock::new(current_size)),
+            segment_stats,
+            gc_running: Arc::new(AtomicBool::new(false)),
+            segment_readers,
+            last_write_time: Arc::new(AtomicU64::new(now_millis)),
         })
     }
 
@@ -329,6 +369,24 @@ impl ValueLog {
             *current_size += entry_len;
         }
 
+        // Update segment stats
+        {
+            let mut stats = self
+                .segment_stats
+                .entry(file_id)
+                .or_insert_with(SegmentStats::new);
+            stats.record_write(entry_len);
+        }
+
+        // Update last write timestamp
+        {
+            let now_millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            self.last_write_time.store(now_millis, Ordering::Release);
+        }
+
         // Check if rotation is needed
         if *self.current_size.read() >= self.config.max_file_size {
             self.rotate()?;
@@ -343,6 +401,14 @@ impl ValueLog {
     /// Read a value from the vLog using a pointer
     pub fn read(&self, pointer: &ValuePointer) -> Result<CipherBlob> {
         let file_path = Self::vlog_file_path(&self.config.vlog_dir, pointer.file_id);
+
+        // Acquire read lock on the segment to prevent deletion during read
+        let reader_lock = self
+            .segment_readers
+            .entry(pointer.file_id)
+            .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone();
+        let _read_guard = reader_lock.read();
 
         // Open file for reading
         let mut file = File::open(&file_path).map_err(|e| {
@@ -376,7 +442,7 @@ impl ValueLog {
     }
 
     /// Rotate to a new vLog file
-    fn rotate(&self) -> Result<()> {
+    pub(crate) fn rotate(&self) -> Result<()> {
         // Flush current file
         {
             let mut writer = self.writer.write();
@@ -408,7 +474,7 @@ impl ValueLog {
         // Update writer
         {
             let mut writer = self.writer.write();
-            *writer = BufWriter::new(file);
+            *writer = std::io::BufWriter::new(file);
         }
 
         // Reset offset and size
@@ -421,11 +487,16 @@ impl ValueLog {
             *size = 0;
         }
 
+        // Initialize stats and reader lock for new segment
+        self.segment_stats.insert(new_file_id, SegmentStats::new());
+        self.segment_readers
+            .insert(new_file_id, Arc::new(RwLock::new(())));
+
         Ok(())
     }
 
     /// Find the latest vLog file number
-    fn find_latest_vlog(config: &ValueLogConfig) -> Result<u64> {
+    pub(crate) fn find_latest_vlog(config: &ValueLogConfig) -> Result<u64> {
         let mut max_file_id = 0u64;
 
         if config.vlog_dir.exists() {
@@ -462,7 +533,7 @@ impl ValueLog {
     }
 
     /// Generate vLog file path
-    fn vlog_file_path(vlog_dir: &Path, file_id: u64) -> PathBuf {
+    pub(crate) fn vlog_file_path(vlog_dir: &Path, file_id: u64) -> PathBuf {
         vlog_dir.join(format!("vlog_{:08}.log", file_id))
     }
 
@@ -490,300 +561,21 @@ impl ValueLog {
         &self.config
     }
 
-    /// Perform garbage collection on a vLog file
-    ///
-    /// Scans the file and rewrites live values to a new file, discarding dead values.
-    /// This is typically called when a file has too much garbage.
-    ///
-    /// `is_live_fn`: Function that checks if a key is still live in the LSM-Tree
-    pub fn garbage_collect<F>(&self, file_id: u64, is_live_fn: F) -> Result<GcStats>
-    where
-        F: Fn(&Key) -> bool,
-    {
-        let file_path = Self::vlog_file_path(&self.config.vlog_dir, file_id);
-
-        // Open old file for reading
-        let old_file = File::open(&file_path).map_err(|e| {
-            AmateRSError::IoError(ErrorContext::new(format!(
-                "Failed to open vLog file for GC: {}",
-                e
-            )))
-        })?;
-
-        let file_size = old_file
-            .metadata()
-            .map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!("Failed to get file size: {}", e)))
-            })?
-            .len();
-
-        let mut reader = BufReader::new(old_file);
-        let mut offset = 0u64;
-
-        let mut live_values = Vec::new();
-        let mut dead_count = 0usize;
-        let mut live_count = 0usize;
-
-        // Scan file and identify live values
-        while offset < file_size {
-            // Read entry length (magic + key_len + key + value_len + value + checksum)
-            let start_offset = offset;
-
-            // Try to read entry
-            let mut magic_bytes = [0u8; 4];
-            match reader.read_exact(&mut magic_bytes) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // End of file
-                    break;
-                }
-                Err(e) => {
-                    return Err(AmateRSError::IoError(ErrorContext::new(format!(
-                        "Failed to read magic: {}",
-                        e
-                    ))));
-                }
-            }
-
-            // Verify magic
-            let magic = u32::from_le_bytes(magic_bytes);
-            if magic != 0x564C4F47 {
-                // Corrupted entry, skip
-                break;
-            }
-
-            // Read key length
-            let mut key_len_bytes = [0u8; 4];
-            reader.read_exact(&mut key_len_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!(
-                    "Failed to read key length: {}",
-                    e
-                )))
-            })?;
-            let key_len = u32::from_le_bytes(key_len_bytes) as usize;
-
-            // Read key
-            let mut key_bytes = vec![0u8; key_len];
-            reader.read_exact(&mut key_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!("Failed to read key: {}", e)))
-            })?;
-            let key = Key::from_slice(&key_bytes);
-
-            // Read value length
-            let mut value_len_bytes = [0u8; 4];
-            reader.read_exact(&mut value_len_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!(
-                    "Failed to read value length: {}",
-                    e
-                )))
-            })?;
-            let value_len = u32::from_le_bytes(value_len_bytes) as usize;
-
-            // Read value
-            let mut value_bytes = vec![0u8; value_len];
-            reader.read_exact(&mut value_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!("Failed to read value: {}", e)))
-            })?;
-            let value = CipherBlob::new(value_bytes);
-
-            // Read checksum
-            let mut checksum_bytes = [0u8; 4];
-            reader.read_exact(&mut checksum_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!("Failed to read checksum: {}", e)))
-            })?;
-
-            // Calculate entry size
-            let entry_size = 4 + 4 + key_len + 4 + value_len + 4;
-            offset += entry_size as u64;
-
-            // Check if value is live
-            if is_live_fn(&key) {
-                live_values.push((key, value));
-                live_count += 1;
-            } else {
-                dead_count += 1;
-            }
-        }
-
-        // Rewrite live values to new file
-        let new_file_id = Self::find_latest_vlog(&self.config)? + 1;
-        let new_file_path = Self::vlog_file_path(&self.config.vlog_dir, new_file_id);
-
-        let new_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&new_file_path)
-            .map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!(
-                    "Failed to create new vLog file: {}",
-                    e
-                )))
-            })?;
-
-        let mut new_writer = BufWriter::new(new_file);
-
-        for (key, value) in live_values {
-            let entry = VLogEntry::new(key, value);
-            let entry_bytes = entry.encode();
-            new_writer.write_all(&entry_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!(
-                    "Failed to write GC entry: {}",
-                    e
-                )))
-            })?;
-        }
-
-        new_writer.flush().map_err(|e| {
-            AmateRSError::IoError(ErrorContext::new(format!("Failed to flush GC file: {}", e)))
-        })?;
-
-        // Delete old file
-        std::fs::remove_file(&file_path).map_err(|e| {
-            AmateRSError::IoError(ErrorContext::new(format!(
-                "Failed to delete old vLog file: {}",
-                e
-            )))
-        })?;
-
-        Ok(GcStats {
-            file_id,
-            live_count,
-            dead_count,
-            reclaimed_bytes: file_size
-                - new_writer
-                    .get_ref()
-                    .metadata()
-                    .map_err(|e| {
-                        AmateRSError::IoError(ErrorContext::new(format!(
-                            "Failed to get new file size: {}",
-                            e
-                        )))
-                    })?
-                    .len(),
-        })
+    /// Get the timestamp (millis since UNIX epoch) of the last write operation
+    pub fn last_write_time_millis(&self) -> u64 {
+        self.last_write_time.load(Ordering::Acquire)
     }
 
-    /// Calculate garbage ratio for a vLog file
-    ///
-    /// Returns the ratio of dead values to total values.
-    /// This can be used to determine if GC is needed.
-    pub fn calculate_garbage_ratio<F>(&self, file_id: u64, is_live_fn: F) -> Result<f64>
-    where
-        F: Fn(&Key) -> bool,
-    {
-        let file_path = Self::vlog_file_path(&self.config.vlog_dir, file_id);
-
-        let file = File::open(&file_path).map_err(|e| {
-            AmateRSError::IoError(ErrorContext::new(format!(
-                "Failed to open vLog file: {}",
-                e
-            )))
-        })?;
-
-        let file_size = file
-            .metadata()
-            .map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!("Failed to get file size: {}", e)))
-            })?
-            .len();
-
-        let mut reader = BufReader::new(file);
-        let mut offset = 0u64;
-
-        let mut live_bytes = 0u64;
-        let mut dead_bytes = 0u64;
-
-        while offset < file_size {
-            let start_offset = offset;
-
-            // Try to read entry
-            let mut magic_bytes = [0u8; 4];
-            match reader.read_exact(&mut magic_bytes) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => {
-                    return Err(AmateRSError::IoError(ErrorContext::new(format!(
-                        "Failed to read magic: {}",
-                        e
-                    ))));
-                }
-            }
-
-            let magic = u32::from_le_bytes(magic_bytes);
-            if magic != 0x564C4F47 {
-                break;
-            }
-
-            // Read key length
-            let mut key_len_bytes = [0u8; 4];
-            reader.read_exact(&mut key_len_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!(
-                    "Failed to read key length: {}",
-                    e
-                )))
-            })?;
-            let key_len = u32::from_le_bytes(key_len_bytes) as usize;
-
-            // Read key
-            let mut key_bytes = vec![0u8; key_len];
-            reader.read_exact(&mut key_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!("Failed to read key: {}", e)))
-            })?;
-            let key = Key::from_slice(&key_bytes);
-
-            // Read value length
-            let mut value_len_bytes = [0u8; 4];
-            reader.read_exact(&mut value_len_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!(
-                    "Failed to read value length: {}",
-                    e
-                )))
-            })?;
-            let value_len = u32::from_le_bytes(value_len_bytes) as usize;
-
-            // Skip value
-            let mut value_bytes = vec![0u8; value_len];
-            reader.read_exact(&mut value_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!("Failed to read value: {}", e)))
-            })?;
-
-            // Skip checksum
-            let mut checksum_bytes = [0u8; 4];
-            reader.read_exact(&mut checksum_bytes).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!("Failed to read checksum: {}", e)))
-            })?;
-
-            let entry_size = 4 + 4 + key_len + 4 + value_len + 4;
-            offset += entry_size as u64;
-
-            if is_live_fn(&key) {
-                live_bytes += entry_size as u64;
-            } else {
-                dead_bytes += entry_size as u64;
-            }
-        }
-
-        let total_bytes = live_bytes + dead_bytes;
-        if total_bytes == 0 {
-            Ok(0.0)
-        } else {
-            Ok(dead_bytes as f64 / total_bytes as f64)
-        }
+    /// Get the duration since the last write operation
+    pub fn time_since_last_write(&self) -> std::time::Duration {
+        let last_millis = self.last_write_time_millis();
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let elapsed_millis = now_millis.saturating_sub(last_millis);
+        std::time::Duration::from_millis(elapsed_millis)
     }
-}
-
-/// Garbage collection statistics
-#[derive(Debug, Clone)]
-pub struct GcStats {
-    /// File ID that was garbage collected
-    pub file_id: u64,
-    /// Number of live values kept
-    pub live_count: usize,
-    /// Number of dead values removed
-    pub dead_count: usize,
-    /// Bytes reclaimed
-    pub reclaimed_bytes: u64,
 }
 
 #[cfg(test)]
@@ -959,7 +751,7 @@ mod tests {
         assert!(ratio > 0.4 && ratio < 0.6); // Should be around 50%
 
         // Perform GC
-        let stats = vlog.garbage_collect(file_id, is_live)?;
+        let stats = vlog.garbage_collect_file(file_id, is_live)?;
 
         assert_eq!(stats.live_count, 5);
         assert_eq!(stats.dead_count, 5);

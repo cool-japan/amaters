@@ -233,11 +233,8 @@ impl BlockCache {
         }
 
         let current_size = *self.current_size.read();
-        let mut size_to_free = if current_size + new_block_size > self.config.max_size_bytes {
-            current_size + new_block_size - self.config.max_size_bytes
-        } else {
-            0
-        };
+        let mut size_to_free =
+            (current_size + new_block_size).saturating_sub(self.config.max_size_bytes);
 
         while size_to_free > 0 {
             // Get least recently used key (front of queue) and evict it atomically

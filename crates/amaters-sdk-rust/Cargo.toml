@@ -1,6 +1,7 @@
 [package]
 name = "amaters-sdk-rust"
 description = "Rust SDK for AmateRS"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,7 +21,10 @@ prost = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
 parking_lot = { workspace = true }
+blake3 = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 rustls = { workspace = true }

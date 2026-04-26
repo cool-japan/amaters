@@ -5,8 +5,9 @@
 use amaters_core::storage::{LsmTreeStorage, MemoryStorage};
 use amaters_core::traits::StorageEngine;
 use amaters_core::types::{CipherBlob, Key};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::env;
+use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Global counter for generating unique keys

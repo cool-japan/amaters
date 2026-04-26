@@ -1,6 +1,7 @@
 [package]
 name = "amaters-net"
 description = "Network layer for AmateRS (Musubi)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +15,7 @@ categories = ["network-programming", "cryptography"]
 default = ["mtls"]
 mtls = ["dep:rustls", "dep:tokio-rustls", "dep:x509-parser", "dep:rcgen", "dep:webpki-roots", "dep:rustls-pemfile"]
 compute = ["amaters-core/compute"]
+compression = ["tonic/gzip"]
 
 [dependencies]
 amaters-core = { workspace = true }
@@ -28,6 +30,15 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+blake3 = { workspace = true }
+tower = { workspace = true }
+tower-layer = { workspace = true }
+tower-service = { workspace = true }
+http = { workspace = true }
+jsonwebtoken = { workspace = true }
+serde = { workspace = true }
 
 # mTLS dependencies (feature-gated)
 rustls = { workspace = true, optional = true }
@@ -45,6 +56,12 @@ prost-build = "0.14"
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "net_bench"
+harness = false
 
 [lints]
 workspace = true

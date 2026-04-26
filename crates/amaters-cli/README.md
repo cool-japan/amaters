@@ -2,150 +2,154 @@
 
 Command-line interface for AmateRS
 
+**Status:** Alpha | **Version:** 0.2.0 | **License:** Apache-2.0 | **Tests:** 243 | **Public items:** 87
+
 ## Overview
 
-`amaters-cli` provides a convenient command-line tool for interacting with AmateRS servers. It's useful for administration, debugging, and quick operations.
+`amaters-cli` provides a full-featured command-line tool for administering and interacting with AmateRS servers. It ships with a persistent REPL, shell completion generation for five shells, flexible config management, and colorized table/JSON/YAML output.
 
-**Current Status**: Phase 1-6 implemented - Basic commands (Set, Get, Delete), Query commands (Range, Filter), Key Management, Server Management, Administration, Configuration management, and Output formatting (JSON, YAML, Table) with progress bars are fully functional.
+## Features
+
+- **CLI** built with clap derive — full help text, typed arguments, subcommand tree
+- **REPL**: history persistence, multi-line editing, bang-expansion (`!cmd`), colorized output, per-session statistics
+- **Admin commands**: backup, restore, compaction, integrity verify, stats, live log tailing
+- **Shell completion**: Bash, Zsh, Fish, PowerShell, Elvish
+- **Config management**: `init`, `validate`, `show`, `set <key> <value>`, `get <key>`
+- **Output formats**: JSON, YAML, table (comfy-table with Unicode box-drawing)
+- **Progress bars** for long-running operations
+- **Batch operations**: `amaters-cli batch <file>` / `amaters-cli batch -` (stdin); `BatchCommand` with streaming `BufReader` (never buffers all); line-by-line `put`/`delete` op parsing; JSON mode for scripts
+- **Pagination flags**: `--limit <n>`, `--offset <n>`, `--cursor <token>` on `range`/`scan`/`query` subcommands; next cursor displayed in output
+- **Watch mode**: `amaters-cli watch <interval_secs> <command...>` re-executes a command on a tokio interval; ANSI screen clear between runs; Ctrl-C exits cleanly (no crossterm dependency)
 
 ## Installation
 
 ```bash
 # Build from source
-cargo install --path crates/amaters-cli
+cargo build --release --bin amaters-cli
 
-# Or use cargo install (once published)
-cargo install amaters-cli
+# Or install directly
+cargo install --path crates/amaters-cli
 ```
 
 ## Quick Start
 
 ```bash
-# Initialize configuration (optional)
+# Initialize configuration
 amaters-cli config init
 
-# Set environment variables (optional)
-export AMATERS_SERVER_URL="http://localhost:50051"
-export AMATERS_COLLECTION="default"
-export AMATERS_OUTPUT_FORMAT="table"
+# Start the REPL
+amaters-cli repl
 
-# Set a value
-amaters-cli set my_key "my encrypted value"
-
-# Get a value
+# Or run individual commands
+amaters-cli set my_key "hello world"
 amaters-cli get my_key
-
-# Delete a value
 amaters-cli delete my_key
-
-# Range query
-amaters-cli range start_key end_key
-
-# Query with filter (API ready, needs SDK implementation)
-amaters-cli query "age > 18"
-
-# Show configuration
-amaters-cli config show
 ```
 
 ## Commands
 
-### ✅ Data Operations (Implemented)
+### Data Operations
 
 ```bash
-# Set a key-value pair
 amaters-cli set <key> <value>
-
-# Get a value by key
 amaters-cli get <key>
-
-# Delete a key
 amaters-cli delete <key>
-```
-
-### ✅ Query Operations (Implemented)
-
-```bash
-# Range query
 amaters-cli range <start-key> <end-key>
-
-# Execute filter query (API ready, needs SDK implementation)
-amaters-cli query <filter-expression>
 ```
 
-### ✅ Configuration (Implemented)
+### REPL
 
 ```bash
-# Initialize configuration file
+# Start interactive REPL with history and multi-line editing
+amaters-cli repl
+
+# Inside the REPL:
+# - Arrow keys for history navigation
+# - Ctrl-D or "exit" to quit
+# - "!" prefix to run a shell command (bang expansion)
+# - Multi-line input with trailing backslash
+# - Session stats shown on exit
+```
+
+### Admin Commands
+
+```bash
+# Backup
+amaters-cli admin backup <destination-dir>
+amaters-cli admin backup <destination-dir> --incremental
+
+# Restore
+amaters-cli admin restore <source-dir>
+
+# Compaction
+amaters-cli admin compact
+amaters-cli admin compact --collection <name>
+
+# Statistics
+amaters-cli admin stats
+
+# Integrity verification
+amaters-cli admin verify
+
+# Server logs
+amaters-cli admin logs
+amaters-cli admin logs -n 500
+amaters-cli admin logs --follow
+```
+
+### Shell Completion
+
+```bash
+# Generate and install completions
+amaters-cli completion bash   >> ~/.bash_completion.d/amaters-cli
+amaters-cli completion zsh    > ~/.zfunc/_amaters-cli
+amaters-cli completion fish   > ~/.config/fish/completions/amaters-cli.fish
+amaters-cli completion powershell >> $PROFILE
+amaters-cli completion elvish >> ~/.elvish/rc.elv
+```
+
+### Config Management
+
+```bash
+# Create default config file
 amaters-cli config init
 
-# Show current configuration
+# Validate current config file
+amaters-cli config validate
+
+# Show all configuration values
 amaters-cli config show
+
+# Set a single key
+amaters-cli config set server_url http://prod.example.com:50051
+
+# Get a single key
+amaters-cli config get server_url
 ```
 
-### ✅ Key Management (Implemented - Phase 3)
+### Server Management
 
 ```bash
-# Generate new FHE keys
-amaters-cli key generate <key-name> --description "My key"
-
-# Import key from file
-amaters-cli key import <key-name> --file <path> --description "Imported key"
-
-# Export key to file
-amaters-cli key export <key-name> --file <output-path>
-
-# List all keys
-amaters-cli key list
-
-# Delete a key
-amaters-cli key delete <key-name>
-```
-
-### ✅ Server Management (Implemented - Phase 4)
-
-```bash
-# Show detailed server status
 amaters-cli server status
-
-# Perform health check
 amaters-cli server health
-
-# Show server metrics
 amaters-cli server metrics
-
-# Show cluster information
 amaters-cli server cluster
-
-# Show node information
 amaters-cli server nodes
 ```
 
-### ✅ Administration (Implemented - Phase 5)
+### Key Management
 
 ```bash
-# Create a database backup
-amaters-cli admin backup <destination-dir> [--incremental]
-
-# Restore from backup
-amaters-cli admin restore <source-dir>
-
-# Trigger manual compaction
-amaters-cli admin compact [--collection <name>]
-
-# Show database statistics
-amaters-cli admin stats
-
-# Verify database integrity
-amaters-cli admin verify
-
-# Show server logs
-amaters-cli admin logs [-n <lines>] [--follow]
+amaters-cli key generate <key-name> --description "Production key"
+amaters-cli key import <key-name> --file <path>
+amaters-cli key export <key-name> --file <output-path>
+amaters-cli key list
+amaters-cli key delete <key-name>
 ```
 
 ## Configuration
 
-Configuration file is automatically created at `~/.amaters/config.toml`:
+The configuration file lives at `~/.amaters/config.toml` and is created by `amaters-cli config init`:
 
 ```toml
 server_url = "http://localhost:50051"
@@ -160,52 +164,31 @@ enabled = false
 # client_key = "/path/to/client-key.pem"
 ```
 
-You can initialize it with:
-```bash
-amaters-cli config init
-```
-
-### Command-line Options
-
-Override configuration with flags:
+### CLI flags (override config)
 
 ```bash
 amaters-cli -s <server-url> -c <collection> -f <format> <command>
 ```
 
-Options:
-- `-s, --server <URL>`: Server URL
-- `-c, --collection <NAME>`: Collection name
-- `-f, --format <FORMAT>`: Output format (json, yaml, table)
+| Flag | Description |
+|------|-------------|
+| `-s, --server <URL>` | Server URL |
+| `-c, --collection <NAME>` | Collection name |
+| `-f, --format <FORMAT>` | Output format: `json`, `yaml`, `table` |
 
-### Environment Variables
-
-Environment variables override config file:
+### Environment variables (override config file)
 
 ```bash
-# Server URL
 export AMATERS_SERVER_URL="http://localhost:50051"
-
-# Default collection
 export AMATERS_COLLECTION="default"
-
-# Output format
 export AMATERS_OUTPUT_FORMAT="json"
-
-# Enable/disable color
 export AMATERS_COLOR="true"
 ```
 
 ## Output Formats
 
 ### Table (default)
-```bash
-amaters-cli get my_key
-# Or explicitly:
-amaters-cli -f table get my_key
-```
 
-Output:
 ```
 ┌────────────┬──────────────────────┐
 │ Property   │ Value                │
@@ -213,16 +196,12 @@ Output:
 │ Key        │ my_key               │
 │ Size       │ 1024 bytes           │
 │ Checksum   │ 0xa1b2c3d4           │
-│ Created At │ 2026-01-17T12:00:00Z │
+│ Created At │ 2026-03-28T12:00:00Z │
 └────────────┴──────────────────────┘
 ```
 
 ### JSON
-```bash
-amaters-cli -f json get my_key
-```
 
-Output:
 ```json
 {
   "status": "success",
@@ -231,17 +210,13 @@ Output:
   "value": {
     "size": 1024,
     "checksum": 2712847316,
-    "created_at": "2026-01-17T12:00:00Z"
+    "created_at": "2026-03-28T12:00:00Z"
   }
 }
 ```
 
 ### YAML
-```bash
-amaters-cli -f yaml get my_key
-```
 
-Output:
 ```yaml
 status: success
 operation: get
@@ -249,170 +224,49 @@ key: my_key
 value:
   size: 1024
   checksum: 2712847316
-  created_at: '2026-01-17T12:00:00Z'
+  created_at: '2026-03-28T12:00:00Z'
 ```
 
 ## Examples
 
-### Basic Operations
+### REPL session
 
-```bash
-# Set a value
-amaters-cli set user:123 "John Doe"
-# ✓ Successfully set key: user:123
-
-# Get a value
-amaters-cli get user:123
-# Shows detailed table
-
-# Delete a value
-amaters-cli delete user:123
-# ✓ Successfully deleted key: user:123
+```
+$ amaters-cli repl
+amaters> set user:1 "Alice"
+✓ Set user:1
+amaters> get user:1
+┌──────┬───────┐
+│ Key  │ user:1│
+│ Value│ Alice │
+└──────┴───────┘
+amaters> !date
+Sat Mar 28 12:00:00 UTC 2026
+amaters> exit
+Session: 3 commands, 0 errors
 ```
 
-### Using Different Output Formats
+### Admin backup and restore
 
 ```bash
-# JSON output
-amaters-cli -f json get user:123
-
-# Table output (default)
-amaters-cli get user:123
-```
-
-### Range Queries
-
-```bash
-# Query a range of keys
-amaters-cli range user:000 user:999
-
-# With JSON output
-amaters-cli -f json range user:000 user:999
-```
-
-### Configuration
-
-```bash
-# Initialize config
-amaters-cli config init
-# ✓ Configuration initialized at: ~/.amaters/config.toml
-
-# View config
-amaters-cli config show
-```
-
-### Using Environment Variables
-
-```bash
-# Override server URL
-export AMATERS_SERVER_URL="http://production.example.com:50051"
-amaters-cli get user:123
-
-# Override collection
-export AMATERS_COLLECTION="production"
-amaters-cli set key value
-```
-
-### Key Management
-
-```bash
-# Generate a new key
-amaters-cli key generate my_key --description "Production key"
-# ⠋ Generating FHE keys (this may take a while)...
-# ✓ Generated key 'my_key' (12345 bytes)
-
-# List all keys
-amaters-cli key list
-# Shows JSON/YAML/Table with all keys
-
-# Export a key
-amaters-cli key export my_key --file ./backup/my_key.key
-# ✓ Exported key 'my_key' to "./backup/my_key.key"
-
-# Import a key
-amaters-cli key import restored_key --file ./backup/my_key.key
-# ✓ Imported key 'restored_key' from "./backup/my_key.key"
-
-# Delete a key
-amaters-cli key delete old_key
-# ✓ Deleted key 'old_key'
-```
-
-### Server Management
-
-```bash
-# Check server status
-amaters-cli server status
-# Shows version, uptime, connections, memory usage, etc.
-
-# Health check
-amaters-cli server health
-# Shows database, consensus, and network health
-
-# View metrics
-amaters-cli server metrics
-# Shows QPS, latency, cache hit rate, etc.
-
-# Cluster information
-amaters-cli server cluster
-# Shows cluster ID, nodes, leader, replication factor
-
-# Node information
-amaters-cli server nodes
-# Shows details about each node in the cluster
-```
-
-### Administration
-
-```bash
-# Create a backup
 amaters-cli admin backup /backups/db_$(date +%Y%m%d)
-# ⠋ Creating backup...
-# Shows backup metadata (ID, size, key count, etc.)
+# Shows backup metadata (ID, size, key count, duration)
 
-# Create incremental backup
-amaters-cli admin backup /backups/incremental --incremental
-
-# Restore from backup
-amaters-cli admin restore /backups/db_20260117
-# ⠋ Restoring from backup...
-# Shows restore result (keys restored, duration, etc.)
-
-# Trigger compaction
-amaters-cli admin compact
-# ⠋ Running compaction...
-# Shows compaction result (bytes reclaimed, duration, etc.)
-
-# Compact specific collection
-amaters-cli admin compact --collection users
-
-# View database statistics
-amaters-cli admin stats
-# Shows detailed DB stats (SSTables, memtables, WAL, compaction)
-
-# Verify database integrity
-amaters-cli admin verify
-# ⠋ Verifying database integrity...
-# Shows verification result (verified keys, errors found, etc.)
-
-# View server logs
-amaters-cli admin logs
-# Shows last 100 lines
-
-# View last 500 lines
-amaters-cli admin logs -n 500
-
-# Follow logs (tail -f style)
-amaters-cli admin logs --follow
+amaters-cli admin restore /backups/db_20260328
+# Shows restore result (keys restored, duration)
 ```
 
-## Shell Completion (Planned - Phase 7)
+### Install Zsh completion
 
-Shell completion will be available in a future release.
+```bash
+amaters-cli completion zsh > ~/.zfunc/_amaters-cli
+echo 'fpath=(~/.zfunc $fpath)' >> ~/.zshrc
+echo 'autoload -U compinit && compinit' >> ~/.zshrc
+```
 
 ## License
 
-Licensed under MIT OR Apache-2.0
+Licensed under Apache-2.0
 
 ## Authors
 

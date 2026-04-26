@@ -6,11 +6,14 @@
 //! 3. Environment variables
 //! 4. CLI arguments (highest priority)
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tracing::{info, warn};
 
 /// Configuration errors
 #[derive(Error, Debug)]
@@ -310,13 +313,19 @@ pub struct JwtSettings {
     #[serde(default = "default_false")]
     pub enabled: bool,
 
-    /// JWT secret key (for HS256)
+    /// JWT secret key (for HMAC algorithms: HS256, HS384, HS512)
     pub secret: Option<String>,
 
-    /// JWT public key path (for RS256)
+    /// RSA public key path (for RS256, RS384, RS512)
     pub public_key_path: Option<PathBuf>,
 
-    /// JWT algorithm (HS256, RS256)
+    /// EC public key path (for ES256, ES384)
+    pub ec_public_key_path: Option<PathBuf>,
+
+    /// Ed25519 public key path (for EdDSA)
+    pub ed_public_key_path: Option<PathBuf>,
+
+    /// JWT algorithm (HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384, EdDSA)
     #[serde(default = "default_jwt_algorithm")]
     pub algorithm: String,
 
@@ -616,6 +625,8 @@ impl Default for JwtSettings {
             enabled: false,
             secret: None,
             public_key_path: None,
+            ec_public_key_path: None,
+            ed_public_key_path: None,
             algorithm: default_jwt_algorithm(),
             expiration_secs: default_jwt_expiration(),
             issuer: None,
@@ -857,6 +868,368 @@ impl ServerConfig {
     }
 }
 
+/// Identifies configuration sections that can be hot-reloaded without restart
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReloadableSection {
+    /// Log level and format - always safe to reload
+    Logging,
+    /// Metrics export interval - always safe to reload
+    Metrics,
+    /// Compaction strategy parameters - safe between compaction runs
+    Compaction,
+    /// Rate limiting parameters - always safe to reload
+    RateLimit,
+}
+
+impl std::fmt::Display for ReloadableSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReloadableSection::Logging => write!(f, "logging"),
+            ReloadableSection::Metrics => write!(f, "metrics"),
+            ReloadableSection::Compaction => write!(f, "compaction"),
+            ReloadableSection::RateLimit => write!(f, "rate_limit"),
+        }
+    }
+}
+
+/// Identifies configuration sections that require a server restart
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NonReloadableSection {
+    /// Server bind address requires restart
+    BindAddress,
+    /// Server port requires restart
+    Port,
+    /// TLS certificate path requires restart
+    TlsCertPath,
+    /// TLS key path requires restart
+    TlsKeyPath,
+    /// Storage engine type requires restart
+    StorageEngine,
+    /// Data directory requires restart
+    DataDir,
+    /// Cluster node ID requires restart
+    ClusterNodeId,
+}
+
+impl std::fmt::Display for NonReloadableSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NonReloadableSection::BindAddress => write!(f, "bind_address"),
+            NonReloadableSection::Port => write!(f, "port"),
+            NonReloadableSection::TlsCertPath => write!(f, "tls_cert_path"),
+            NonReloadableSection::TlsKeyPath => write!(f, "tls_key_path"),
+            NonReloadableSection::StorageEngine => write!(f, "storage_engine"),
+            NonReloadableSection::DataDir => write!(f, "data_dir"),
+            NonReloadableSection::ClusterNodeId => write!(f, "cluster_node_id"),
+        }
+    }
+}
+
+/// Tracks which fields changed between two configurations
+#[derive(Debug, Clone, Default)]
+pub struct ConfigDiff {
+    /// Reloadable sections that changed
+    pub reloadable_changes: Vec<ReloadableSection>,
+    /// Non-reloadable sections that changed (require restart)
+    pub non_reloadable_changes: Vec<NonReloadableSection>,
+}
+
+impl ConfigDiff {
+    /// Returns true if there are no changes
+    pub fn is_empty(&self) -> bool {
+        self.reloadable_changes.is_empty() && self.non_reloadable_changes.is_empty()
+    }
+
+    /// Returns true if any non-reloadable sections changed
+    pub fn has_non_reloadable_changes(&self) -> bool {
+        !self.non_reloadable_changes.is_empty()
+    }
+}
+
+/// Compare two configs and produce a diff of what changed
+pub fn diff(old: &ServerConfig, new: &ServerConfig) -> ConfigDiff {
+    let mut result = ConfigDiff::default();
+
+    // Check reloadable sections
+    if old.logging.level != new.logging.level
+        || old.logging.format != new.logging.format
+        || old.logging.file_enabled != new.logging.file_enabled
+        || old.logging.file_path != new.logging.file_path
+        || old.logging.rotation.enabled != new.logging.rotation.enabled
+        || old.logging.rotation.max_size_mb != new.logging.rotation.max_size_mb
+        || old.logging.rotation.max_backups != new.logging.rotation.max_backups
+    {
+        result.reloadable_changes.push(ReloadableSection::Logging);
+    }
+
+    if old.metrics.export_interval_secs != new.metrics.export_interval_secs
+        || old.metrics.enabled != new.metrics.enabled
+    {
+        result.reloadable_changes.push(ReloadableSection::Metrics);
+    }
+
+    if old.storage.compaction.strategy != new.storage.compaction.strategy
+        || old.storage.compaction.num_levels != new.storage.compaction.num_levels
+        || old.storage.compaction.level_multiplier != new.storage.compaction.level_multiplier
+        || old.storage.compaction.max_concurrent != new.storage.compaction.max_concurrent
+    {
+        result
+            .reloadable_changes
+            .push(ReloadableSection::Compaction);
+    }
+
+    if old.server.max_connections != new.server.max_connections {
+        result.reloadable_changes.push(ReloadableSection::RateLimit);
+    }
+
+    // Check non-reloadable sections
+    if old.server.bind_address != new.server.bind_address {
+        result
+            .non_reloadable_changes
+            .push(NonReloadableSection::BindAddress);
+    }
+
+    if old.server.data_dir != new.server.data_dir {
+        result
+            .non_reloadable_changes
+            .push(NonReloadableSection::DataDir);
+    }
+
+    if old.storage.engine != new.storage.engine {
+        result
+            .non_reloadable_changes
+            .push(NonReloadableSection::StorageEngine);
+    }
+
+    if old.network.tls_cert != new.network.tls_cert {
+        result
+            .non_reloadable_changes
+            .push(NonReloadableSection::TlsCertPath);
+    }
+
+    if old.network.tls_key != new.network.tls_key {
+        result
+            .non_reloadable_changes
+            .push(NonReloadableSection::TlsKeyPath);
+    }
+
+    if let (Some(old_cluster), Some(new_cluster)) = (&old.cluster, &new.cluster) {
+        if old_cluster.node_id != new_cluster.node_id {
+            result
+                .non_reloadable_changes
+                .push(NonReloadableSection::ClusterNodeId);
+        }
+    }
+
+    result
+}
+
+/// Report of a configuration reload operation
+#[derive(Debug, Clone)]
+pub struct ReloadReport {
+    /// Sections that were successfully updated
+    pub sections_updated: Vec<ReloadableSection>,
+    /// Non-reloadable sections that were skipped (would require restart)
+    pub sections_skipped: Vec<NonReloadableSection>,
+    /// Errors encountered during reload
+    pub errors: Vec<String>,
+    /// Whether the reload was overall successful
+    pub success: bool,
+}
+
+impl std::fmt::Display for ReloadReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.success {
+            write!(f, "Config reload successful. ")?;
+        } else {
+            write!(f, "Config reload failed. ")?;
+        }
+        if !self.sections_updated.is_empty() {
+            write!(f, "Updated: ")?;
+            for (i, s) in self.sections_updated.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", s)?;
+            }
+            write!(f, ". ")?;
+        }
+        if !self.sections_skipped.is_empty() {
+            write!(f, "Skipped (restart required): ")?;
+            for (i, s) in self.sections_skipped.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", s)?;
+            }
+            write!(f, ". ")?;
+        }
+        for err in &self.errors {
+            write!(f, "Error: {}. ", err)?;
+        }
+        Ok(())
+    }
+}
+
+/// Wrapper around `ServerConfig` that supports hot-reloading
+///
+/// Uses `Arc<RwLock<ServerConfig>>` so that readers can access the config
+/// concurrently, and reloads atomically swap the inner config.
+#[derive(Clone)]
+pub struct ReloadableConfig {
+    inner: Arc<RwLock<ServerConfig>>,
+    /// Path to the config file (used for SIGHUP reload)
+    config_path: Arc<RwLock<Option<PathBuf>>>,
+}
+
+impl ReloadableConfig {
+    /// Create a new reloadable config from an existing config
+    pub fn new(config: ServerConfig) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(config)),
+            config_path: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Create a new reloadable config from a file
+    pub fn from_file(path: &str) -> ConfigResult<Self> {
+        let config = ServerConfig::from_file(path)?;
+        let rc = Self::new(config);
+        *rc.config_path.write() = Some(PathBuf::from(path));
+        Ok(rc)
+    }
+
+    /// Set the config file path (for future reloads)
+    pub fn set_config_path(&self, path: PathBuf) {
+        *self.config_path.write() = Some(path);
+    }
+
+    /// Get a read guard to the current configuration
+    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, ServerConfig> {
+        self.inner.read()
+    }
+
+    /// Get a clone of the current configuration
+    pub fn snapshot(&self) -> ServerConfig {
+        self.inner.read().clone()
+    }
+
+    /// Reload configuration from a file path
+    ///
+    /// Parses the new config, validates it, computes a diff, and applies
+    /// only the reloadable sections. Non-reloadable changes are skipped
+    /// with warnings. If validation fails, the old config is preserved.
+    pub fn reload_from_file(&self, path: &str) -> ConfigResult<ReloadReport> {
+        // Parse new config from file
+        let contents = std::fs::read_to_string(path)?;
+        let new_config: ServerConfig = toml::from_str(&contents)?;
+
+        // Validate before applying
+        if let Err(e) = new_config.validate() {
+            return Ok(ReloadReport {
+                sections_updated: Vec::new(),
+                sections_skipped: Vec::new(),
+                errors: vec![format!("Validation failed: {}", e)],
+                success: false,
+            });
+        }
+
+        self.apply_reload(new_config)
+    }
+
+    /// Reload from the stored config path (used by SIGHUP handler)
+    pub fn reload_from_stored_path(&self) -> ConfigResult<ReloadReport> {
+        let path = self.config_path.read().clone();
+        match path {
+            Some(p) => {
+                let path_str = p.to_string_lossy().to_string();
+                self.reload_from_file(&path_str)
+            }
+            None => Ok(ReloadReport {
+                sections_updated: Vec::new(),
+                sections_skipped: Vec::new(),
+                errors: vec!["No config file path set for reload".to_string()],
+                success: false,
+            }),
+        }
+    }
+
+    /// Apply a new config, returning a reload report
+    fn apply_reload(&self, new_config: ServerConfig) -> ConfigResult<ReloadReport> {
+        let mut report = ReloadReport {
+            sections_updated: Vec::new(),
+            sections_skipped: Vec::new(),
+            errors: Vec::new(),
+            success: true,
+        };
+
+        let config_diff = {
+            let current = self.inner.read();
+            diff(&current, &new_config)
+        };
+
+        if config_diff.is_empty() {
+            info!("Config reload: no changes detected");
+            return Ok(report);
+        }
+
+        // Warn about non-reloadable changes
+        for section in &config_diff.non_reloadable_changes {
+            warn!(
+                "Config reload: section '{}' changed but requires restart - skipping",
+                section
+            );
+            report.sections_skipped.push(*section);
+        }
+
+        // Apply reloadable changes atomically
+        if !config_diff.reloadable_changes.is_empty() {
+            let mut current = self.inner.write();
+
+            for section in &config_diff.reloadable_changes {
+                match section {
+                    ReloadableSection::Logging => {
+                        current.logging = new_config.logging.clone();
+                        info!("Config reload: updated logging settings");
+                    }
+                    ReloadableSection::Metrics => {
+                        // Only update export_interval and enabled, not bind_address
+                        current.metrics.export_interval_secs =
+                            new_config.metrics.export_interval_secs;
+                        current.metrics.enabled = new_config.metrics.enabled;
+                        info!("Config reload: updated metrics settings");
+                    }
+                    ReloadableSection::Compaction => {
+                        current.storage.compaction = new_config.storage.compaction.clone();
+                        info!("Config reload: updated compaction settings");
+                    }
+                    ReloadableSection::RateLimit => {
+                        current.server.max_connections = new_config.server.max_connections;
+                        info!("Config reload: updated rate limit settings");
+                    }
+                }
+                report.sections_updated.push(*section);
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Manual reload trigger (useful on non-Unix platforms or for testing)
+    pub fn manual_reload(&self) -> ConfigResult<ReloadReport> {
+        self.reload_from_stored_path()
+    }
+}
+
+impl std::fmt::Debug for ReloadableConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReloadableConfig")
+            .field("config", &*self.inner.read())
+            .field("config_path", &*self.config_path.read())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -930,5 +1303,327 @@ mod tests {
         assert_eq!(config.server.bind_address, loaded.server.bind_address);
 
         std::fs::remove_file(&config_path).ok();
+    }
+
+    // --- Reload tests ---
+
+    /// Helper to save a config to a temp file and return the path
+    fn save_temp_config(config: &ServerConfig, name: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!("amaters_reload_test_{}.toml", name));
+        config
+            .save_to_file(&path)
+            .expect("Failed to save temp config");
+        path
+    }
+
+    #[test]
+    fn test_reload_logging_section() {
+        let config = ServerConfig::default();
+        let path = save_temp_config(&config, "reload_logging");
+
+        let reloadable = ReloadableConfig::new(config);
+        reloadable.set_config_path(path.clone());
+
+        // Modify the file to change logging
+        let mut new_config = reloadable.snapshot();
+        new_config.logging.level = "debug".to_string();
+        new_config.logging.format = "json".to_string();
+        new_config
+            .save_to_file(&path)
+            .expect("Failed to save modified config");
+
+        let report = reloadable
+            .reload_from_file(path.to_str().expect("path should be valid utf-8"))
+            .expect("Reload should succeed");
+
+        assert!(report.success);
+        assert!(
+            report
+                .sections_updated
+                .contains(&ReloadableSection::Logging)
+        );
+        assert_eq!(reloadable.read().logging.level, "debug");
+        assert_eq!(reloadable.read().logging.format, "json");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_reload_metrics_section() {
+        let config = ServerConfig::default();
+        let path = save_temp_config(&config, "reload_metrics");
+
+        let reloadable = ReloadableConfig::new(config);
+
+        let mut new_config = reloadable.snapshot();
+        new_config.metrics.export_interval_secs = 120;
+        new_config
+            .save_to_file(&path)
+            .expect("Failed to save modified config");
+
+        let report = reloadable
+            .reload_from_file(path.to_str().expect("path should be valid utf-8"))
+            .expect("Reload should succeed");
+
+        assert!(report.success);
+        assert!(
+            report
+                .sections_updated
+                .contains(&ReloadableSection::Metrics)
+        );
+        assert_eq!(reloadable.read().metrics.export_interval_secs, 120);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_non_reloadable_section_skipped() {
+        let config = ServerConfig::default();
+        let path = save_temp_config(&config, "reload_non_reloadable");
+
+        let reloadable = ReloadableConfig::new(config);
+
+        let mut new_config = reloadable.snapshot();
+        // Change bind address (non-reloadable)
+        new_config.server.bind_address = "127.0.0.1:9999".to_string();
+        // Also change logging (reloadable) to verify partial apply
+        new_config.logging.level = "warn".to_string();
+        new_config
+            .save_to_file(&path)
+            .expect("Failed to save modified config");
+
+        let report = reloadable
+            .reload_from_file(path.to_str().expect("path should be valid utf-8"))
+            .expect("Reload should succeed");
+
+        assert!(report.success);
+        // Logging should be updated
+        assert!(
+            report
+                .sections_updated
+                .contains(&ReloadableSection::Logging)
+        );
+        assert_eq!(reloadable.read().logging.level, "warn");
+        // Bind address should be skipped (old value preserved)
+        assert!(
+            report
+                .sections_skipped
+                .contains(&NonReloadableSection::BindAddress)
+        );
+        assert_eq!(reloadable.read().server.bind_address, "0.0.0.0:7878");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_invalid_config_rejected() {
+        let config = ServerConfig::default();
+        let path = save_temp_config(&config, "reload_invalid");
+
+        let reloadable = ReloadableConfig::new(config);
+
+        // Write invalid config (bad bind address)
+        let mut new_config = reloadable.snapshot();
+        new_config.server.bind_address = "not-an-address".to_string();
+        // Manually write TOML since save_to_file doesn't validate
+        let contents = toml::to_string_pretty(&new_config).expect("Failed to serialize config");
+        std::fs::write(&path, contents).expect("Failed to write config");
+
+        let report = reloadable
+            .reload_from_file(path.to_str().expect("path should be valid utf-8"))
+            .expect("Reload should return report");
+
+        assert!(!report.success);
+        assert!(!report.errors.is_empty());
+        // Old config should be preserved
+        assert_eq!(reloadable.read().server.bind_address, "0.0.0.0:7878");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_config_diff_detection() {
+        let old = ServerConfig::default();
+        let mut new = old.clone();
+
+        // No changes
+        let d = diff(&old, &new);
+        assert!(d.is_empty());
+
+        // Change logging
+        new.logging.level = "error".to_string();
+        let d = diff(&old, &new);
+        assert!(d.reloadable_changes.contains(&ReloadableSection::Logging));
+        assert!(!d.has_non_reloadable_changes());
+
+        // Change bind address
+        new.server.bind_address = "127.0.0.1:1234".to_string();
+        let d = diff(&old, &new);
+        assert!(d.has_non_reloadable_changes());
+        assert!(
+            d.non_reloadable_changes
+                .contains(&NonReloadableSection::BindAddress)
+        );
+
+        // Change compaction
+        new.storage.compaction.strategy = "tiered".to_string();
+        let d = diff(&old, &new);
+        assert!(
+            d.reloadable_changes
+                .contains(&ReloadableSection::Compaction)
+        );
+
+        // Change max_connections (rate limit)
+        new.server.max_connections = 5000;
+        let d = diff(&old, &new);
+        assert!(d.reloadable_changes.contains(&ReloadableSection::RateLimit));
+    }
+
+    #[test]
+    fn test_reload_report_contents() {
+        let config = ServerConfig::default();
+        let path = save_temp_config(&config, "reload_report");
+
+        let reloadable = ReloadableConfig::new(config);
+
+        // Change multiple sections
+        let mut new_config = reloadable.snapshot();
+        new_config.logging.level = "trace".to_string();
+        new_config.metrics.export_interval_secs = 30;
+        new_config.server.bind_address = "127.0.0.1:5555".to_string();
+        new_config
+            .save_to_file(&path)
+            .expect("Failed to save modified config");
+
+        let report = reloadable
+            .reload_from_file(path.to_str().expect("path should be valid utf-8"))
+            .expect("Reload should succeed");
+
+        assert!(report.success);
+        assert_eq!(report.sections_updated.len(), 2); // Logging + Metrics
+        assert_eq!(report.sections_skipped.len(), 1); // BindAddress
+        assert!(report.errors.is_empty());
+
+        // Verify Display impl works
+        let display = format!("{}", report);
+        assert!(display.contains("Updated"));
+        assert!(display.contains("Skipped"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_concurrent_reads_during_reload() {
+        let config = ServerConfig::default();
+        let path = save_temp_config(&config, "reload_concurrent");
+
+        let reloadable = ReloadableConfig::new(config);
+
+        // Spawn multiple reader threads
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let rc = reloadable.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        let _level = rc.read().logging.level.clone();
+                    }
+                })
+            })
+            .collect();
+
+        // Perform reloads while readers are active
+        let mut new_config = reloadable.snapshot();
+        new_config.logging.level = "debug".to_string();
+        new_config
+            .save_to_file(&path)
+            .expect("Failed to save modified config");
+
+        let _report = reloadable
+            .reload_from_file(path.to_str().expect("path should be valid utf-8"))
+            .expect("Reload should succeed");
+
+        for h in handles {
+            h.join().expect("Reader thread should not panic");
+        }
+
+        assert_eq!(reloadable.read().logging.level, "debug");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_multiple_sequential_reloads() {
+        let config = ServerConfig::default();
+        let path = save_temp_config(&config, "reload_sequential");
+
+        let reloadable = ReloadableConfig::new(config);
+
+        let levels = ["debug", "warn", "error", "trace", "info"];
+        for level in &levels {
+            let mut new_config = reloadable.snapshot();
+            new_config.logging.level = level.to_string();
+            new_config
+                .save_to_file(&path)
+                .expect("Failed to save modified config");
+
+            let report = reloadable
+                .reload_from_file(path.to_str().expect("path should be valid utf-8"))
+                .expect("Reload should succeed");
+
+            assert!(report.success);
+            assert_eq!(reloadable.read().logging.level, *level);
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_reload_no_stored_path() {
+        let config = ServerConfig::default();
+        let reloadable = ReloadableConfig::new(config);
+
+        let report = reloadable
+            .reload_from_stored_path()
+            .expect("Should return report");
+
+        assert!(!report.success);
+        assert!(!report.errors.is_empty());
+    }
+
+    #[test]
+    fn test_reloadable_config_from_file() {
+        let config = ServerConfig::default();
+        let path = save_temp_config(&config, "reload_from_file");
+
+        let reloadable =
+            ReloadableConfig::from_file(path.to_str().expect("path should be valid utf-8"))
+                .expect("Should load from file");
+
+        assert_eq!(reloadable.read().server.bind_address, "0.0.0.0:7878");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_manual_reload() {
+        let config = ServerConfig::default();
+        let path = save_temp_config(&config, "reload_manual");
+
+        let reloadable = ReloadableConfig::new(config);
+        reloadable.set_config_path(path.clone());
+
+        let mut new_config = reloadable.snapshot();
+        new_config.logging.level = "error".to_string();
+        new_config
+            .save_to_file(&path)
+            .expect("Failed to save modified config");
+
+        let report = reloadable
+            .manual_reload()
+            .expect("Manual reload should succeed");
+        assert!(report.success);
+        assert_eq!(reloadable.read().logging.level, "error");
+
+        std::fs::remove_file(&path).ok();
     }
 }

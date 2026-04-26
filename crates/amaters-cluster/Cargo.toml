@@ -1,6 +1,7 @@
 [package]
 name = "amaters-cluster"
 description = "Consensus layer for AmateRS (Ukehi)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +18,18 @@ tokio = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+crc32fast = { workspace = true }
+chrono = { workspace = true }
+aes-gcm = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hkdf = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tracing-test = { workspace = true }
 
 [lints]
 workspace = true

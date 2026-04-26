@@ -1,6 +1,7 @@
 [package]
 name = "amaters-sdk-typescript"
 description = "TypeScript/WASM SDK for AmateRS - Fully Homomorphic Encrypted Database"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,6 +28,13 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Performance",
     "PerformanceTiming",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Headers",
+    "AbortController",
+    "AbortSignal",
 ] }
 
 # Serialization for JS interop
@@ -37,11 +45,11 @@ serde-wasm-bindgen = "0.6"
 # Error handling
 thiserror = { workspace = true }
 
-# Async runtime for WASM
-tokio = { version = "1.49", default-features = false, features = ["sync"] }
+# Async runtime for WASM + native HTTP transport
+tokio = { version = "1.50", default-features = false, features = ["sync", "net", "io-util", "time", "rt"] }
 
 # Timers for WASM
-gloo-timers = { version = "0.3", features = ["futures"] }
+gloo-timers = { version = "0.4", features = ["futures"] }
 
 # Console logging for WASM
 console_error_panic_hook = { version = "0.1", optional = true }

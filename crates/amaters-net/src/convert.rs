@@ -488,7 +488,7 @@ mod tests {
     fn test_version_creation() {
         let version = create_version();
         assert_eq!(version.major, 0);
-        assert_eq!(version.minor, 1);
+        assert_eq!(version.minor, 2);
         assert_eq!(version.patch, 0);
     }
 }

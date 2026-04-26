@@ -7,7 +7,8 @@ use crate::error::{RaftError, RaftResult};
 use crate::shard::{KeyRange, ShardId, ShardMetadata, ShardRegistry};
 use crate::types::NodeId;
 use amaters_core::Key;
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -110,13 +111,16 @@ impl Partitioner {
         }
         ring.sort_by_key(|&(hash, _)| hash);
 
-        // Find the shard for this key
+        // Find the shard for this key (wrap around to first entry if key_hash exceeds all ring entries)
         let key_hash = hash_key(key);
         let shard_id = ring
             .iter()
             .find(|&&(hash, _)| hash >= key_hash)
+            .or_else(|| ring.first())
             .map(|&(_, id)| id)
-            .unwrap_or_else(|| ring[0].1);
+            .ok_or_else(|| RaftError::ConfigError {
+                message: "Consistent hash ring is empty".to_string(),
+            })?;
 
         self.registry.get(shard_id).ok_or_else(|| RaftError::ConfigError {
             message: format!("Shard {} not found in registry", shard_id),
@@ -322,38 +326,280 @@ impl QueryStats {
     }
 }
 
-/// Result merger for scatter-gather queries
+/// Item tracked in the k-way merge heap.
+///
+/// Stores the value alongside its shard and position indices so that
+/// the next element from the same shard can be pushed after a pop.
+struct MergeItem<T> {
+    value: T,
+    shard_idx: usize,
+    item_idx: usize,
+}
+
+// We want a *min*-heap but `BinaryHeap` is a max-heap, so we reverse
+// the ordering.  Two items from different shards that compare equal are
+// tie-broken by shard index to give a stable, deterministic output.
+impl<T: Ord> PartialEq for MergeItem<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.shard_idx == other.shard_idx
+    }
+}
+
+impl<T: Ord> Eq for MergeItem<T> {}
+
+impl<T: Ord> PartialOrd for MergeItem<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: Ord> Ord for MergeItem<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse so that BinaryHeap (max-heap) behaves as a min-heap.
+        // Tie-break on shard_idx for determinism.
+        other
+            .value
+            .cmp(&self.value)
+            .then_with(|| other.shard_idx.cmp(&self.shard_idx))
+    }
+}
+
+/// Wrapper used for `merge_sorted_by_key` where the sort key is extracted
+/// via a closure and may differ from the value's natural ordering.
+struct MergeItemByKey<T, K> {
+    value: T,
+    key: K,
+    shard_idx: usize,
+    item_idx: usize,
+}
+
+impl<T, K: Ord> PartialEq for MergeItemByKey<T, K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.shard_idx == other.shard_idx
+    }
+}
+
+impl<T, K: Ord> Eq for MergeItemByKey<T, K> {}
+
+impl<T, K: Ord> PartialOrd for MergeItemByKey<T, K> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T, K: Ord> Ord for MergeItemByKey<T, K> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .key
+            .cmp(&self.key)
+            .then_with(|| other.shard_idx.cmp(&self.shard_idx))
+    }
+}
+
+/// Result merger for scatter-gather queries.
+///
+/// Provides several strategies for combining results returned from
+/// multiple shards:
+///
+/// - **`merge`** – simple concatenation (no ordering guarantees).
+/// - **`merge_sorted`** – efficient O(N log K) k-way merge that
+///   assumes each input `Vec` is already sorted.
+/// - **`merge_sorted_by_key`** – same algorithm but sorts by a
+///   caller-supplied key extractor, useful for `(Key, Value)` tuples.
+/// - **`merge_deduplicate`** – unordered merge with duplicate removal.
+/// - **`merge_sorted_deduplicate`** – ordered merge with duplicate removal.
 pub struct ResultMerger;
 
 impl ResultMerger {
-    /// Merge results from multiple shards (placeholder for future implementation)
-    pub fn merge<T>(_results: Vec<Vec<T>>) -> Vec<T>
-    where
-        T: Clone,
-    {
-        // TODO: Implement proper merging logic based on query type
-        // For now, just flatten all results
-        _results.into_iter().flatten().collect()
-    }
-
-    /// Merge and sort results by key
-    pub fn merge_sorted<T>(_results: Vec<Vec<T>>) -> Vec<T>
-    where
-        T: Clone + Ord,
-    {
-        // TODO: Implement efficient k-way merge for sorted results
-        let mut merged: Vec<T> = _results.into_iter().flatten().collect();
-        merged.sort();
+    /// Merge results from multiple shards by simple concatenation.
+    ///
+    /// No ordering guarantees.  O(N) where N is the total number of items.
+    pub fn merge<T>(results: Vec<Vec<T>>) -> Vec<T> {
+        let total_len: usize = results.iter().map(|v| v.len()).sum();
+        let mut merged = Vec::with_capacity(total_len);
+        for batch in results {
+            merged.extend(batch);
+        }
         merged
     }
 
-    /// Merge with deduplication
-    pub fn merge_deduplicate<T>(_results: Vec<Vec<T>>) -> Vec<T>
+    /// Merge pre-sorted shard results using an efficient k-way merge.
+    ///
+    /// Each input `Vec` **must** be sorted in ascending order.  The output
+    /// is a single sorted `Vec`.
+    ///
+    /// Complexity: O(N log K) where N = total items, K = number of shards.
+    pub fn merge_sorted<T>(results: Vec<Vec<T>>) -> Vec<T>
     where
-        T: Clone + Eq + Hash,
+        T: Ord,
     {
-        let set: HashSet<T> = _results.into_iter().flatten().collect();
+        let total_len: usize = results.iter().map(|v| v.len()).sum();
+        if total_len == 0 {
+            return Vec::new();
+        }
+
+        // Convert each Vec into an owning iterator so we can pull items
+        // one-by-one without cloning.
+        let mut iterators: Vec<std::vec::IntoIter<T>> =
+            results.into_iter().map(|v| v.into_iter()).collect();
+
+        let mut heap: BinaryHeap<MergeItem<T>> =
+            BinaryHeap::with_capacity(iterators.len());
+
+        // Seed the heap with the first element from each non-empty shard.
+        for (shard_idx, iter) in iterators.iter_mut().enumerate() {
+            if let Some(value) = iter.next() {
+                heap.push(MergeItem {
+                    value,
+                    shard_idx,
+                    item_idx: 0,
+                });
+            }
+        }
+
+        let mut merged = Vec::with_capacity(total_len);
+
+        while let Some(item) = heap.pop() {
+            let next_item_idx = item.item_idx + 1;
+            let shard_idx = item.shard_idx;
+            merged.push(item.value);
+
+            // Push the next element from the same shard, if available.
+            if let Some(value) = iterators[shard_idx].next() {
+                heap.push(MergeItem {
+                    value,
+                    shard_idx,
+                    item_idx: next_item_idx,
+                });
+            }
+        }
+
+        merged
+    }
+
+    /// Merge pre-sorted shard results by a key extracted via `key_fn`.
+    ///
+    /// Each input `Vec` **must** be sorted in ascending order of the key.
+    /// Useful for merging `(Key, CipherBlob)` tuples where sorting is
+    /// done on the `Key` component.
+    ///
+    /// Complexity: O(N log K) where N = total items, K = number of shards.
+    pub fn merge_sorted_by_key<T, K, F>(results: Vec<Vec<T>>, key_fn: F) -> Vec<T>
+    where
+        K: Ord,
+        F: Fn(&T) -> K,
+    {
+        let total_len: usize = results.iter().map(|v| v.len()).sum();
+        if total_len == 0 {
+            return Vec::new();
+        }
+
+        let mut iterators: Vec<std::vec::IntoIter<T>> =
+            results.into_iter().map(|v| v.into_iter()).collect();
+
+        let mut heap: BinaryHeap<MergeItemByKey<T, K>> =
+            BinaryHeap::with_capacity(iterators.len());
+
+        for (shard_idx, iter) in iterators.iter_mut().enumerate() {
+            if let Some(value) = iter.next() {
+                let key = key_fn(&value);
+                heap.push(MergeItemByKey {
+                    value,
+                    key,
+                    shard_idx,
+                    item_idx: 0,
+                });
+            }
+        }
+
+        let mut merged = Vec::with_capacity(total_len);
+
+        while let Some(item) = heap.pop() {
+            let next_item_idx = item.item_idx + 1;
+            let shard_idx = item.shard_idx;
+            merged.push(item.value);
+
+            if let Some(value) = iterators[shard_idx].next() {
+                let key = key_fn(&value);
+                heap.push(MergeItemByKey {
+                    value,
+                    key,
+                    shard_idx,
+                    item_idx: next_item_idx,
+                });
+            }
+        }
+
+        merged
+    }
+
+    /// Merge with deduplication (unordered).
+    pub fn merge_deduplicate<T>(results: Vec<Vec<T>>) -> Vec<T>
+    where
+        T: Eq + Hash,
+    {
+        let mut set: HashSet<T> = HashSet::new();
+        for batch in results {
+            set.extend(batch);
+        }
         set.into_iter().collect()
+    }
+
+    /// Merge pre-sorted shard results with deduplication.
+    ///
+    /// Uses the k-way merge algorithm and skips consecutive duplicates.
+    /// Each input `Vec` **must** be sorted and should not contain
+    /// duplicates within a single shard for best results.
+    ///
+    /// Complexity: O(N log K) where N = total items, K = number of shards.
+    pub fn merge_sorted_deduplicate<T>(results: Vec<Vec<T>>) -> Vec<T>
+    where
+        T: Ord,
+    {
+        let total_len: usize = results.iter().map(|v| v.len()).sum();
+        if total_len == 0 {
+            return Vec::new();
+        }
+
+        let mut iterators: Vec<std::vec::IntoIter<T>> =
+            results.into_iter().map(|v| v.into_iter()).collect();
+
+        let mut heap: BinaryHeap<MergeItem<T>> =
+            BinaryHeap::with_capacity(iterators.len());
+
+        for (shard_idx, iter) in iterators.iter_mut().enumerate() {
+            if let Some(value) = iter.next() {
+                heap.push(MergeItem {
+                    value,
+                    shard_idx,
+                    item_idx: 0,
+                });
+            }
+        }
+
+        let mut merged = Vec::with_capacity(total_len);
+
+        while let Some(item) = heap.pop() {
+            let next_item_idx = item.item_idx + 1;
+            let shard_idx = item.shard_idx;
+
+            // Skip duplicate if the last pushed element is equal.
+            let is_dup = merged.last().map_or(false, |last: &T| last == &item.value);
+            if !is_dup {
+                merged.push(item.value);
+            }
+
+            if let Some(value) = iterators[shard_idx].next() {
+                heap.push(MergeItem {
+                    value,
+                    shard_idx,
+                    item_idx: next_item_idx,
+                });
+            }
+        }
+
+        merged.shrink_to_fit();
+        merged
     }
 }
 
@@ -531,24 +777,289 @@ mod tests {
         Ok(())
     }
 
+    // ---------------------------------------------------------------
+    //  ResultMerger tests
+    // ---------------------------------------------------------------
+
     #[test]
-    fn test_result_merger() {
+    fn test_result_merger_merge_concatenates() {
         let results = vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
         let merged = ResultMerger::merge(results);
-        assert_eq!(merged.len(), 9);
+        assert_eq!(merged, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]
-    fn test_result_merger_sorted() {
+    fn test_result_merger_merge_empty_inputs() {
+        let results: Vec<Vec<i32>> = vec![];
+        let merged = ResultMerger::merge(results);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_result_merger_merge_some_empty_vecs() {
+        let results: Vec<Vec<i32>> = vec![vec![], vec![1, 2], vec![], vec![3]];
+        let merged = ResultMerger::merge(results);
+        assert_eq!(merged, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_result_merger_merge_all_empty_vecs() {
+        let results: Vec<Vec<i32>> = vec![vec![], vec![], vec![]];
+        let merged = ResultMerger::merge(results);
+        assert!(merged.is_empty());
+    }
+
+    // -- merge_sorted (k-way merge) ------------------------------------
+
+    #[test]
+    fn test_merge_sorted_basic() {
         let results = vec![vec![1, 5, 9], vec![2, 6, 10], vec![3, 7, 11]];
         let merged = ResultMerger::merge_sorted(results);
         assert_eq!(merged, vec![1, 2, 3, 5, 6, 7, 9, 10, 11]);
     }
 
     #[test]
+    fn test_merge_sorted_empty_input() {
+        let results: Vec<Vec<i32>> = vec![];
+        let merged = ResultMerger::merge_sorted(results);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_merge_sorted_single_shard() {
+        let results = vec![vec![10, 20, 30]];
+        let merged = ResultMerger::merge_sorted(results);
+        assert_eq!(merged, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_merge_sorted_single_element_shards() {
+        let results = vec![vec![5], vec![1], vec![3]];
+        let merged = ResultMerger::merge_sorted(results);
+        assert_eq!(merged, vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn test_merge_sorted_with_empty_shards() {
+        let results = vec![vec![], vec![1, 3, 5], vec![], vec![2, 4], vec![]];
+        let merged = ResultMerger::merge_sorted(results);
+        assert_eq!(merged, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_merge_sorted_all_empty_shards() {
+        let results: Vec<Vec<i32>> = vec![vec![], vec![], vec![]];
+        let merged = ResultMerger::merge_sorted(results);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_merge_sorted_with_duplicates() {
+        let results = vec![vec![1, 3, 5], vec![1, 3, 5], vec![2, 4, 6]];
+        let merged = ResultMerger::merge_sorted(results);
+        assert_eq!(merged, vec![1, 1, 2, 3, 3, 4, 5, 5, 6]);
+    }
+
+    #[test]
+    fn test_merge_sorted_unequal_lengths() {
+        let results = vec![vec![1], vec![2, 4, 6, 8, 10], vec![3, 5]];
+        let merged = ResultMerger::merge_sorted(results);
+        assert_eq!(merged, vec![1, 2, 3, 4, 5, 6, 8, 10]);
+    }
+
+    #[test]
+    fn test_merge_sorted_negative_numbers() {
+        let results = vec![vec![-10, -5, 0], vec![-8, -3, 2], vec![-20, 1]];
+        let merged = ResultMerger::merge_sorted(results);
+        assert_eq!(merged, vec![-20, -10, -8, -5, -3, 0, 1, 2]);
+    }
+
+    #[test]
+    fn test_merge_sorted_strings() {
+        let results = vec![
+            vec!["apple".to_string(), "cherry".to_string()],
+            vec!["banana".to_string(), "date".to_string()],
+        ];
+        let merged = ResultMerger::merge_sorted(results);
+        assert_eq!(
+            merged,
+            vec![
+                "apple".to_string(),
+                "banana".to_string(),
+                "cherry".to_string(),
+                "date".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_merge_sorted_large_scale() {
+        // 100 shards x 100 items each
+        let num_shards = 100;
+        let items_per_shard = 100;
+        let mut results: Vec<Vec<i64>> = Vec::with_capacity(num_shards);
+
+        for shard_idx in 0..num_shards {
+            let shard: Vec<i64> = (0..items_per_shard)
+                .map(|i| (shard_idx as i64) + (i as i64) * (num_shards as i64))
+                .collect();
+            results.push(shard);
+        }
+
+        let merged = ResultMerger::merge_sorted(results);
+
+        // Verify length
+        assert_eq!(merged.len(), num_shards * items_per_shard);
+
+        // Verify sorted
+        for window in merged.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "Output not sorted: {} > {}",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_sorted_deterministic_tie_breaking() {
+        // When values are equal, shard ordering should be deterministic
+        let results = vec![vec![1, 2, 3], vec![1, 2, 3], vec![1, 2, 3]];
+        let merged1 = ResultMerger::merge_sorted(results.clone());
+        let merged2 = ResultMerger::merge_sorted(results);
+        assert_eq!(merged1, merged2);
+        assert_eq!(merged1, vec![1, 1, 1, 2, 2, 2, 3, 3, 3]);
+    }
+
+    // -- merge_sorted_by_key -------------------------------------------
+
+    #[test]
+    fn test_merge_sorted_by_key_basic() {
+        // Simulate (key, value) tuples sorted by key
+        let results = vec![
+            vec![(1, "a"), (3, "c"), (5, "e")],
+            vec![(2, "b"), (4, "d"), (6, "f")],
+        ];
+        let merged = ResultMerger::merge_sorted_by_key(results, |item| item.0);
+        let keys: Vec<i32> = merged.iter().map(|item| item.0).collect();
+        assert_eq!(keys, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_merge_sorted_by_key_empty() {
+        let results: Vec<Vec<(i32, &str)>> = vec![];
+        let merged = ResultMerger::merge_sorted_by_key(results, |item: &(i32, &str)| item.0);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_merge_sorted_by_key_with_string_keys() {
+        let results = vec![
+            vec![("apple", 10), ("cherry", 30)],
+            vec![("banana", 20), ("date", 40)],
+        ];
+        let merged = ResultMerger::merge_sorted_by_key(results, |item| item.0);
+        let keys: Vec<&str> = merged.iter().map(|item| item.0).collect();
+        assert_eq!(keys, vec!["apple", "banana", "cherry", "date"]);
+    }
+
+    #[test]
+    fn test_merge_sorted_by_key_reverse_field() {
+        // Sort by a secondary field (the value, not the first element)
+        let results = vec![
+            vec![("x", 1), ("y", 3), ("z", 5)],
+            vec![("a", 2), ("b", 4), ("c", 6)],
+        ];
+        let merged = ResultMerger::merge_sorted_by_key(results, |item| item.1);
+        let values: Vec<i32> = merged.iter().map(|item| item.1).collect();
+        assert_eq!(values, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    // -- merge_deduplicate ---------------------------------------------
+
+    #[test]
     fn test_result_merger_deduplicate() {
         let results = vec![vec![1, 2, 3], vec![2, 3, 4], vec![3, 4, 5]];
+        let mut merged = ResultMerger::merge_deduplicate(results);
+        merged.sort();
+        assert_eq!(merged, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_result_merger_deduplicate_empty() {
+        let results: Vec<Vec<i32>> = vec![];
         let merged = ResultMerger::merge_deduplicate(results);
-        assert_eq!(merged.len(), 5); // 1, 2, 3, 4, 5
+        assert!(merged.is_empty());
+    }
+
+    // -- merge_sorted_deduplicate --------------------------------------
+
+    #[test]
+    fn test_merge_sorted_deduplicate_basic() {
+        let results = vec![vec![1, 3, 5], vec![1, 3, 5], vec![2, 4, 6]];
+        let merged = ResultMerger::merge_sorted_deduplicate(results);
+        assert_eq!(merged, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_merge_sorted_deduplicate_no_dups() {
+        let results = vec![vec![1, 4, 7], vec![2, 5, 8], vec![3, 6, 9]];
+        let merged = ResultMerger::merge_sorted_deduplicate(results);
+        assert_eq!(merged, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn test_merge_sorted_deduplicate_all_same() {
+        let results = vec![vec![1, 1, 1], vec![1, 1], vec![1]];
+        let merged = ResultMerger::merge_sorted_deduplicate(results);
+        assert_eq!(merged, vec![1]);
+    }
+
+    #[test]
+    fn test_merge_sorted_deduplicate_empty() {
+        let results: Vec<Vec<i32>> = vec![];
+        let merged = ResultMerger::merge_sorted_deduplicate(results);
+        assert!(merged.is_empty());
+    }
+
+    // -- property-style randomized test --------------------------------
+
+    #[test]
+    fn test_merge_sorted_random_property() {
+        // Generate pseudo-random sorted vectors and verify the merge is sorted.
+        // Uses a simple LCG to avoid depending on `rand`.
+        let num_shards = 20;
+        let max_items = 50;
+        let mut seed: u64 = 0xDEAD_BEEF_CAFE;
+
+        let mut results: Vec<Vec<i64>> = Vec::with_capacity(num_shards);
+        for _ in 0..num_shards {
+            // Determine shard length
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let len = (seed % (max_items as u64 + 1)) as usize;
+
+            let mut shard = Vec::with_capacity(len);
+            for _ in 0..len {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                shard.push((seed >> 33) as i64); // use upper bits for quality
+            }
+            shard.sort();
+            results.push(shard);
+        }
+
+        let expected_len: usize = results.iter().map(|v| v.len()).sum();
+        let merged = ResultMerger::merge_sorted(results);
+        assert_eq!(merged.len(), expected_len);
+
+        // Verify sorted
+        for window in merged.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "Property violation: {} > {}",
+                window[0],
+                window[1]
+            );
+        }
     }
 }

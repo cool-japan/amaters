@@ -9,6 +9,17 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+/// Statistics from WAL recovery
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryStats {
+    /// Number of entries successfully recovered
+    pub entries_recovered: u64,
+    /// Number of corrupted entries encountered
+    pub entries_corrupted: u64,
+    /// Total bytes recovered
+    pub bytes_recovered: u64,
+}
+
 /// WAL entry type
 #[derive(Debug, Clone, PartialEq)]
 pub enum WalEntryType {
@@ -310,36 +321,35 @@ impl Wal {
         let mut max_sequence = 0u64;
 
         if config.wal_dir.exists() {
-            let entries = std::fs::read_dir(&config.wal_dir).map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!(
-                    "Failed to read WAL directory: {}",
-                    e
-                )))
-            })?;
+            let wal_file_numbers = Self::list_wal_file_numbers(&config.wal_dir)?;
 
-            for entry in entries {
-                let entry = entry.map_err(|e| {
-                    AmateRSError::IoError(ErrorContext::new(format!(
-                        "Failed to read directory entry: {}",
-                        e
-                    )))
-                })?;
+            if let Some(&last) = wal_file_numbers.last() {
+                max_file_number = last;
+            }
 
-                let file_name = entry.file_name();
-                let name = file_name.to_string_lossy();
-
-                // Parse WAL file names: wal_NNNNNNNN.log
-                if name.starts_with("wal_") && name.ends_with(".log") {
-                    if let Ok(number) = name[4..name.len() - 4].parse::<u64>() {
-                        if number > max_file_number {
-                            max_file_number = number;
+            // Scan all WAL files to recover the max sequence number
+            for file_num in &wal_file_numbers {
+                let file_path = Self::wal_file_path(&config.wal_dir, *file_num);
+                if let Ok(mut reader) = WalReader::open(&file_path) {
+                    loop {
+                        match reader.read_entry() {
+                            Ok(Some(entry)) => {
+                                if entry.sequence >= max_sequence {
+                                    max_sequence = entry.sequence + 1;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "Corrupted entry found in WAL file {} during startup",
+                                    file_path.display()
+                                );
+                                continue;
+                            }
                         }
                     }
                 }
             }
-
-            // TODO: Read the latest WAL file to get the max sequence number
-            // For now, we'll start from 0
         }
 
         Ok((max_file_number, max_sequence))
@@ -348,6 +358,35 @@ impl Wal {
     /// Generate WAL file path for a given file number
     fn wal_file_path(wal_dir: &Path, file_number: u64) -> PathBuf {
         wal_dir.join(format!("wal_{:08}.log", file_number))
+    }
+
+    /// List all WAL file numbers in the directory, sorted ascending
+    fn list_wal_file_numbers(wal_dir: &Path) -> Result<Vec<u64>> {
+        let entries = std::fs::read_dir(wal_dir).map_err(|e| {
+            AmateRSError::IoError(ErrorContext::new(format!(
+                "Failed to read WAL directory: {}",
+                e
+            )))
+        })?;
+
+        let mut numbers = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!(
+                    "Failed to read directory entry: {}",
+                    e
+                )))
+            })?;
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if name.starts_with("wal_") && name.ends_with(".log") {
+                if let Ok(number) = name[4..name.len() - 4].parse::<u64>() {
+                    numbers.push(number);
+                }
+            }
+        }
+        numbers.sort_unstable();
+        Ok(numbers)
     }
 
     /// Append a Put entry
@@ -446,39 +485,8 @@ impl Wal {
 
     /// Clean up old WAL files beyond the retention limit
     fn cleanup_old_wal_files(&self) -> Result<()> {
-        let entries = std::fs::read_dir(&self.config.wal_dir).map_err(|e| {
-            AmateRSError::IoError(ErrorContext::new(format!(
-                "Failed to read WAL directory: {}",
-                e
-            )))
-        })?;
+        let wal_files = Self::list_wal_file_numbers(&self.config.wal_dir)?;
 
-        // Collect all WAL file numbers
-        let mut wal_files: Vec<u64> = Vec::new();
-
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!(
-                    "Failed to read directory entry: {}",
-                    e
-                )))
-            })?;
-
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-
-            // Parse WAL file names: wal_NNNNNNNN.log
-            if name.starts_with("wal_") && name.ends_with(".log") {
-                if let Ok(number) = name[4..name.len() - 4].parse::<u64>() {
-                    wal_files.push(number);
-                }
-            }
-        }
-
-        // Sort by file number (oldest first)
-        wal_files.sort_unstable();
-
-        // Keep only the latest max_wal_files
         if wal_files.len() > self.config.max_wal_files {
             let files_to_delete = wal_files.len() - self.config.max_wal_files;
 
@@ -548,39 +556,8 @@ impl Wal {
             return Ok((Vec::new(), 0));
         }
 
-        let entries = std::fs::read_dir(wal_dir).map_err(|e| {
-            AmateRSError::IoError(ErrorContext::new(format!(
-                "Failed to read WAL directory: {}",
-                e
-            )))
-        })?;
+        let wal_files = Self::list_wal_file_numbers(wal_dir)?;
 
-        // Collect all WAL file numbers
-        let mut wal_files: Vec<u64> = Vec::new();
-
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                AmateRSError::IoError(ErrorContext::new(format!(
-                    "Failed to read directory entry: {}",
-                    e
-                )))
-            })?;
-
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-
-            // Parse WAL file names: wal_NNNNNNNN.log
-            if name.starts_with("wal_") && name.ends_with(".log") {
-                if let Ok(number) = name[4..name.len() - 4].parse::<u64>() {
-                    wal_files.push(number);
-                }
-            }
-        }
-
-        // Sort by file number (oldest first)
-        wal_files.sort_unstable();
-
-        // Read all entries from all files
         let mut all_entries = Vec::new();
         let mut max_sequence = 0u64;
 
@@ -588,7 +565,6 @@ impl Wal {
             let file_path = Self::wal_file_path(wal_dir, file_number);
             let mut reader = WalReader::open(&file_path)?;
 
-            // Read all entries from this file
             loop {
                 match reader.read_entry() {
                     Ok(Some(entry)) => {
@@ -597,18 +573,13 @@ impl Wal {
                         }
                         all_entries.push(entry);
                     }
-                    Ok(None) => {
-                        // End of file
-                        break;
-                    }
+                    Ok(None) => break,
                     Err(e) => {
-                        // Log error but continue recovery
-                        eprintln!(
-                            "Warning: Skipping corrupted entry in {}: {}",
+                        tracing::warn!(
+                            "Skipping corrupted entry in {}: {}",
                             file_path.display(),
                             e
                         );
-                        // Try to continue reading after error
                         continue;
                     }
                 }
@@ -616,6 +587,134 @@ impl Wal {
         }
 
         Ok((all_entries, max_sequence))
+    }
+
+    /// Get current active WAL file size in bytes
+    pub fn current_size(&self) -> u64 {
+        self.current_file_size
+    }
+
+    /// Get total size of all WAL files in the WAL directory
+    pub fn total_wal_size(&self) -> Result<u64> {
+        let wal_files = Self::list_wal_file_numbers(&self.config.wal_dir)?;
+        let mut total_size = 0u64;
+
+        for file_number in wal_files {
+            let file_path = Self::wal_file_path(&self.config.wal_dir, file_number);
+            let metadata = std::fs::metadata(&file_path).map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!(
+                    "Failed to read WAL file metadata: {}",
+                    e
+                )))
+            })?;
+            total_size += metadata.len();
+        }
+
+        Ok(total_size)
+    }
+
+    /// Truncate WAL files whose max sequence number is <= the given sequence.
+    ///
+    /// This is used after a memtable flush to remove WAL files that are no longer needed.
+    /// The current active WAL file is never removed.
+    ///
+    /// Returns the number of files truncated (removed).
+    pub fn truncate_before(&mut self, sequence: u64) -> Result<u64> {
+        self.flush()?;
+
+        let all_files = Self::list_wal_file_numbers(&self.config.wal_dir)?;
+        // Exclude the current active file
+        let wal_files: Vec<u64> = all_files
+            .into_iter()
+            .filter(|&n| n != self.current_file_number)
+            .collect();
+
+        let mut files_truncated = 0u64;
+
+        for file_number in wal_files {
+            let file_path = Self::wal_file_path(&self.config.wal_dir, file_number);
+
+            // Read the file to find its max sequence
+            let mut file_max_seq = 0u64;
+            if let Ok(mut reader) = WalReader::open(&file_path) {
+                loop {
+                    match reader.read_entry() {
+                        Ok(Some(entry)) => {
+                            if entry.sequence > file_max_seq {
+                                file_max_seq = entry.sequence;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => continue,
+                    }
+                }
+            }
+
+            // If all entries in this file are <= the given sequence, remove it
+            if file_max_seq <= sequence {
+                std::fs::remove_file(&file_path).map_err(|e| {
+                    AmateRSError::IoError(ErrorContext::new(format!(
+                        "Failed to remove WAL file {}: {}",
+                        file_path.display(),
+                        e
+                    )))
+                })?;
+                files_truncated += 1;
+            }
+        }
+
+        Ok(files_truncated)
+    }
+
+    /// Recover all entries from WAL files with detailed statistics
+    ///
+    /// Like `recover()`, but also returns `RecoveryStats` with counts of
+    /// recovered entries, corrupted entries, and total bytes recovered.
+    pub fn recover_with_stats(
+        wal_dir: impl AsRef<Path>,
+    ) -> Result<(Vec<WalEntry>, u64, RecoveryStats)> {
+        let wal_dir = wal_dir.as_ref();
+        let mut stats = RecoveryStats::default();
+
+        if !wal_dir.exists() {
+            return Ok((Vec::new(), 0, stats));
+        }
+
+        let wal_files = Self::list_wal_file_numbers(wal_dir)?;
+
+        let mut all_entries = Vec::new();
+        let mut max_sequence = 0u64;
+
+        for file_number in wal_files {
+            let file_path = Self::wal_file_path(wal_dir, file_number);
+            let mut reader = WalReader::open(&file_path)?;
+
+            loop {
+                match reader.read_entry() {
+                    Ok(Some(entry)) => {
+                        let entry_bytes = entry.encode().len() as u64 + 4; // +4 for length prefix
+                        stats.bytes_recovered += entry_bytes;
+                        stats.entries_recovered += 1;
+                        if entry.sequence > max_sequence {
+                            max_sequence = entry.sequence;
+                        }
+                        all_entries.push(entry);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        stats.entries_corrupted += 1;
+                        tracing::warn!(
+                            "Skipping corrupted entry in {}: {}",
+                            file_path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+
+        Ok((all_entries, max_sequence, stats))
     }
 
     /// Replay WAL entries to a memtable
@@ -1204,6 +1303,534 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].key, Key::from_str("key1"));
         assert_eq!(entries[1].key, Key::from_str("key2"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_sequence_recovery_after_crash() -> Result<()> {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("test_wal_seq_recovery_crash");
+        // Clean up from any previous run
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        // Phase 1: Write entries and then drop (simulate crash)
+        {
+            let config = WalConfig {
+                wal_dir: temp_dir.clone(),
+                sync_on_write: true,
+                ..Default::default()
+            };
+
+            let mut wal = Wal::with_config(config)?;
+
+            wal.put(Key::from_str("a"), CipherBlob::new(vec![1]))?;
+            wal.put(Key::from_str("b"), CipherBlob::new(vec![2]))?;
+            wal.put(Key::from_str("c"), CipherBlob::new(vec![3]))?;
+            wal.put(Key::from_str("d"), CipherBlob::new(vec![4]))?;
+            wal.put(Key::from_str("e"), CipherBlob::new(vec![5]))?;
+            wal.flush()?;
+            // sequences 0..4 written, next should be 5
+        }
+
+        // Phase 2: Open a new WAL instance - should recover sequence
+        {
+            let config = WalConfig {
+                wal_dir: temp_dir.clone(),
+                sync_on_write: true,
+                ..Default::default()
+            };
+
+            let mut wal = Wal::with_config(config)?;
+
+            // Sequence should continue from 5 (max was 4, so next is 5)
+            assert_eq!(wal.sequence(), 5);
+
+            // Write more entries
+            let seq = wal.put(Key::from_str("f"), CipherBlob::new(vec![6]))?;
+            assert_eq!(seq, 5);
+
+            let seq = wal.put(Key::from_str("g"), CipherBlob::new(vec![7]))?;
+            assert_eq!(seq, 6);
+
+            wal.flush()?;
+        }
+
+        // Phase 3: Verify all entries are recoverable
+        let (entries, max_sequence) = Wal::recover(&temp_dir)?;
+        assert_eq!(entries.len(), 7);
+        assert_eq!(max_sequence, 6);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_corruption_detection_and_partial_recovery() -> Result<()> {
+        use std::env;
+        use std::io::Write as IoWrite;
+
+        let temp_dir = env::temp_dir().join("test_wal_corruption_detect");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        let wal_file = temp_dir.join("wal_00000000.log");
+
+        // Write valid entries
+        {
+            let config = WalConfig {
+                wal_dir: temp_dir.clone(),
+                sync_on_write: true,
+                ..Default::default()
+            };
+
+            let mut wal = Wal::with_config(config)?;
+            wal.put(Key::from_str("key1"), CipherBlob::new(vec![1, 2, 3]))?;
+            wal.put(Key::from_str("key2"), CipherBlob::new(vec![4, 5, 6]))?;
+            wal.put(Key::from_str("key3"), CipherBlob::new(vec![7, 8, 9]))?;
+            wal.flush()?;
+        }
+
+        // Corrupt the middle entry by modifying bytes in the WAL file
+        {
+            let data = std::fs::read(&wal_file).map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!("Failed to read WAL: {}", e)))
+            })?;
+
+            let mut corrupted_data = data.clone();
+            // The first entry starts at offset 0: 4 bytes length prefix + entry data
+            // Find the start of the second entry by reading the first entry's length
+            let first_entry_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+            let second_entry_start = 4 + first_entry_len;
+
+            // Corrupt bytes inside the second entry (after length prefix, corrupt the checksum area)
+            let corrupt_offset = second_entry_start + 4 + 10; // Skip length prefix and some bytes
+            if corrupt_offset < corrupted_data.len() {
+                corrupted_data[corrupt_offset] ^= 0xFF;
+            }
+
+            let mut file = File::create(&wal_file).map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!("Failed to create file: {}", e)))
+            })?;
+            file.write_all(&corrupted_data).map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!("Failed to write file: {}", e)))
+            })?;
+            file.flush().map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!("Failed to flush file: {}", e)))
+            })?;
+        }
+
+        // Recovery should detect corruption and skip the corrupted entry
+        let (entries, _max_seq, stats) = Wal::recover_with_stats(&temp_dir)?;
+
+        // We should have recovered 2 out of 3 entries (one corrupted)
+        assert_eq!(stats.entries_corrupted, 1);
+        assert_eq!(stats.entries_recovered, entries.len() as u64);
+        assert!(stats.bytes_recovered > 0);
+        // At least 2 entries should be recovered (first and possibly third)
+        assert!(entries.len() >= 2);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_truncate_before() -> Result<()> {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("test_wal_truncate_before");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        let config = WalConfig {
+            wal_dir: temp_dir.clone(),
+            max_file_size: 512, // Small to trigger rotation
+            max_wal_files: 100, // Don't auto-cleanup
+            sync_on_write: true,
+        };
+
+        let mut wal = Wal::with_config(config)?;
+
+        // Write enough entries to create multiple WAL files
+        for i in 0..30 {
+            wal.put(
+                Key::from_str(&format!("key_{}", i)),
+                CipherBlob::new(vec![i as u8; 100]),
+            )?;
+        }
+        wal.flush()?;
+
+        // Ensure multiple files were created
+        let file_count_before = std::fs::read_dir(&temp_dir)
+            .map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!("Failed to read dir: {}", e)))
+            })?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with("wal_") && name.ends_with(".log")
+            })
+            .count();
+        assert!(file_count_before > 1, "Should have multiple WAL files");
+
+        // Truncate all entries with sequence <= 10
+        let truncated = wal.truncate_before(10)?;
+
+        // Should have truncated at least one file
+        assert!(truncated > 0, "Should have truncated at least one file");
+
+        // Verify remaining entries all have sequence > 10 or are in the current file
+        let (remaining_entries, _) = Wal::recover(&temp_dir)?;
+        // Entries in remaining files should include those with seq > 10
+        // (some with seq <= 10 may remain if they share a file with seq > 10 entries)
+        let has_high_seq = remaining_entries.iter().any(|e| e.sequence > 10);
+        assert!(has_high_seq, "Should still have entries with sequence > 10");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_size_tracking() -> Result<()> {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("test_wal_size_tracking");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        let config = WalConfig {
+            wal_dir: temp_dir.clone(),
+            sync_on_write: true,
+            ..Default::default()
+        };
+
+        let mut wal = Wal::with_config(config)?;
+
+        // Initial size should be 0
+        assert_eq!(wal.current_size(), 0);
+
+        // Write an entry
+        wal.put(Key::from_str("key1"), CipherBlob::new(vec![1, 2, 3]))?;
+        let size_after_one = wal.current_size();
+        assert!(size_after_one > 0, "Size should increase after writing");
+
+        // Write another entry
+        wal.put(Key::from_str("key2"), CipherBlob::new(vec![4, 5, 6]))?;
+        let size_after_two = wal.current_size();
+        assert!(
+            size_after_two > size_after_one,
+            "Size should increase with more entries"
+        );
+
+        wal.flush()?;
+
+        // Total WAL size should match current size (single file)
+        let total = wal.total_wal_size()?;
+        assert_eq!(total, size_after_two);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_total_size_multiple_files() -> Result<()> {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("test_wal_total_size_multi");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        let config = WalConfig {
+            wal_dir: temp_dir.clone(),
+            max_file_size: 512,
+            max_wal_files: 100,
+            sync_on_write: true,
+        };
+
+        let mut wal = Wal::with_config(config)?;
+
+        for i in 0..20 {
+            wal.put(
+                Key::from_str(&format!("key_{}", i)),
+                CipherBlob::new(vec![i as u8; 100]),
+            )?;
+        }
+        wal.flush()?;
+
+        let total = wal.total_wal_size()?;
+        assert!(total > 0, "Total WAL size should be positive");
+
+        // Total should be larger than current file size if we have multiple files
+        if wal.current_file_number() > 0 {
+            assert!(
+                total >= wal.current_size(),
+                "Total size should be >= current file size"
+            );
+        }
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_empty_recovery() -> Result<()> {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("test_wal_empty_recovery");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        // Create an empty WAL file
+        {
+            let config = WalConfig {
+                wal_dir: temp_dir.clone(),
+                sync_on_write: true,
+                ..Default::default()
+            };
+            let wal = Wal::with_config(config)?;
+            drop(wal);
+        }
+
+        // Recovery from directory with empty WAL file
+        let (entries, max_seq, stats) = Wal::recover_with_stats(&temp_dir)?;
+        assert_eq!(entries.len(), 0);
+        assert_eq!(max_seq, 0);
+        assert_eq!(stats.entries_recovered, 0);
+        assert_eq!(stats.entries_corrupted, 0);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_single_entry_recovery() -> Result<()> {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("test_wal_single_entry_recovery");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        {
+            let config = WalConfig {
+                wal_dir: temp_dir.clone(),
+                sync_on_write: true,
+                ..Default::default()
+            };
+
+            let mut wal = Wal::with_config(config)?;
+            wal.put(Key::from_str("only_key"), CipherBlob::new(vec![42]))?;
+            wal.flush()?;
+        }
+
+        let (entries, max_seq, stats) = Wal::recover_with_stats(&temp_dir)?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(max_seq, 0);
+        assert_eq!(stats.entries_recovered, 1);
+        assert_eq!(stats.entries_corrupted, 0);
+        assert!(stats.bytes_recovered > 0);
+        assert_eq!(entries[0].key, Key::from_str("only_key"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_large_recovery() -> Result<()> {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("test_wal_large_recovery");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        let entry_count = 500;
+
+        {
+            let config = WalConfig {
+                wal_dir: temp_dir.clone(),
+                max_file_size: 4096,
+                max_wal_files: 1000,
+                sync_on_write: false,
+            };
+
+            let mut wal = Wal::with_config(config)?;
+
+            for i in 0..entry_count {
+                wal.put(
+                    Key::from_str(&format!("large_key_{:05}", i)),
+                    CipherBlob::new(vec![(i % 256) as u8; 50]),
+                )?;
+            }
+            wal.flush()?;
+        }
+
+        // Recover and verify
+        let (entries, max_seq, stats) = Wal::recover_with_stats(&temp_dir)?;
+        assert_eq!(entries.len(), entry_count);
+        assert_eq!(max_seq, (entry_count - 1) as u64);
+        assert_eq!(stats.entries_recovered, entry_count as u64);
+        assert_eq!(stats.entries_corrupted, 0);
+        assert!(stats.bytes_recovered > 0);
+
+        // Verify sequence order
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.sequence, i as u64);
+        }
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_truncate_keeps_current_file() -> Result<()> {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("test_wal_truncate_keeps_current");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        let config = WalConfig {
+            wal_dir: temp_dir.clone(),
+            max_file_size: 512,
+            max_wal_files: 100,
+            sync_on_write: true,
+        };
+
+        let mut wal = Wal::with_config(config)?;
+
+        for i in 0..30 {
+            wal.put(
+                Key::from_str(&format!("key_{}", i)),
+                CipherBlob::new(vec![i as u8; 100]),
+            )?;
+        }
+        wal.flush()?;
+
+        let current_file_num = wal.current_file_number();
+
+        // Truncate everything (use a very high sequence number)
+        wal.truncate_before(u64::MAX)?;
+
+        // Current file should still exist
+        let current_path = Wal::wal_file_path(&temp_dir, current_file_num);
+        assert!(
+            current_path.exists(),
+            "Current active WAL file should not be removed"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_sequence_recovery_across_rotations() -> Result<()> {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("test_wal_seq_recovery_rotation");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        // Phase 1: Write entries across multiple rotations
+        let entries_written;
+        {
+            let config = WalConfig {
+                wal_dir: temp_dir.clone(),
+                max_file_size: 512,
+                max_wal_files: 100,
+                sync_on_write: true,
+            };
+
+            let mut wal = Wal::with_config(config)?;
+
+            for i in 0..25 {
+                wal.put(
+                    Key::from_str(&format!("rkey_{}", i)),
+                    CipherBlob::new(vec![i as u8; 80]),
+                )?;
+            }
+            wal.flush()?;
+            entries_written = wal.sequence();
+        }
+
+        // Phase 2: Open new WAL and verify sequence continues
+        {
+            let config = WalConfig {
+                wal_dir: temp_dir.clone(),
+                max_file_size: 512,
+                max_wal_files: 100,
+                sync_on_write: true,
+            };
+
+            let wal = Wal::with_config(config)?;
+            assert_eq!(
+                wal.sequence(),
+                entries_written,
+                "Sequence should continue from where it left off"
+            );
+        }
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_recovery_stats_with_corruption() -> Result<()> {
+        use std::env;
+        use std::io::Write as IoWrite;
+
+        let temp_dir = env::temp_dir().join("test_wal_recovery_stats_corrupt");
+        std::fs::remove_dir_all(&temp_dir).ok();
+        std::fs::create_dir_all(&temp_dir).ok();
+
+        let wal_file = temp_dir.join("wal_00000000.log");
+
+        // Write valid entries
+        {
+            let config = WalConfig {
+                wal_dir: temp_dir.clone(),
+                sync_on_write: true,
+                ..Default::default()
+            };
+
+            let mut wal = Wal::with_config(config)?;
+            wal.put(Key::from_str("s1"), CipherBlob::new(vec![10]))?;
+            wal.put(Key::from_str("s2"), CipherBlob::new(vec![20]))?;
+            wal.flush()?;
+        }
+
+        // Append garbage data that looks like a valid length prefix but has bad content
+        {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&wal_file)
+                .map_err(|e| {
+                    AmateRSError::IoError(ErrorContext::new(format!(
+                        "Failed to open for corruption: {}",
+                        e
+                    )))
+                })?;
+            // Write a length prefix for 30 bytes, then 30 bytes of garbage
+            let fake_len = 30u32;
+            file.write_all(&fake_len.to_le_bytes()).map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!("write error: {}", e)))
+            })?;
+            file.write_all(&[0xDE; 30]).map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!("write error: {}", e)))
+            })?;
+            file.flush().map_err(|e| {
+                AmateRSError::IoError(ErrorContext::new(format!("flush error: {}", e)))
+            })?;
+        }
+
+        let (_entries, _max_seq, stats) = Wal::recover_with_stats(&temp_dir)?;
+
+        assert_eq!(stats.entries_recovered, 2);
+        assert!(
+            stats.entries_corrupted >= 1,
+            "Should detect at least one corrupted entry"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
         Ok(())

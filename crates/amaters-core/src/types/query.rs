@@ -4,6 +4,13 @@
 
 use super::{CipherBlob, Key};
 
+/// Maximum byte length considered "plaintext" for predicate evaluation.
+///
+/// Real FHE ciphertexts are kilobytes in size. Values that fit within this
+/// threshold are treated as raw (non-encrypted) byte sequences, enabling
+/// server-side predicate evaluation without FHE machinery.
+const PLAINTEXT_MAX_BYTES: usize = 64;
+
 /// Top-level query type
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
@@ -55,6 +62,80 @@ pub enum Predicate {
     Or(Box<Predicate>, Box<Predicate>),
     /// Logical NOT
     Not(Box<Predicate>),
+}
+
+impl Predicate {
+    /// Evaluate this predicate against a stored plaintext value.
+    ///
+    /// Returns `Some(true)` if the value matches, `Some(false)` if it does not,
+    /// or `None` if plaintext evaluation is not applicable (e.g. either the
+    /// stored value or the comparison value exceeds `PLAINTEXT_MAX_BYTES` (64 bytes),
+    /// indicating an FHE ciphertext rather than raw bytes).
+    ///
+    /// Values are compared lexicographically as big-endian byte sequences.
+    /// For single-byte unsigned integers this is equivalent to numeric ordering.
+    pub fn evaluate_plaintext(&self, stored: &CipherBlob) -> Option<bool> {
+        match self {
+            Predicate::Eq(_, rhs) => {
+                if stored.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                    || rhs.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                {
+                    return None;
+                }
+                Some(stored.as_bytes() == rhs.as_bytes())
+            }
+            Predicate::Gt(_, rhs) => {
+                if stored.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                    || rhs.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                {
+                    return None;
+                }
+                Some(stored.as_bytes() > rhs.as_bytes())
+            }
+            Predicate::Lt(_, rhs) => {
+                if stored.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                    || rhs.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                {
+                    return None;
+                }
+                Some(stored.as_bytes() < rhs.as_bytes())
+            }
+            Predicate::Gte(_, rhs) => {
+                if stored.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                    || rhs.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                {
+                    return None;
+                }
+                Some(stored.as_bytes() >= rhs.as_bytes())
+            }
+            Predicate::Lte(_, rhs) => {
+                if stored.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                    || rhs.as_bytes().len() > PLAINTEXT_MAX_BYTES
+                {
+                    return None;
+                }
+                Some(stored.as_bytes() <= rhs.as_bytes())
+            }
+            Predicate::And(left, right) => {
+                let l = left.evaluate_plaintext(stored)?;
+                if !l {
+                    return Some(false);
+                }
+                right.evaluate_plaintext(stored)
+            }
+            Predicate::Or(left, right) => {
+                let l = left.evaluate_plaintext(stored)?;
+                if l {
+                    return Some(true);
+                }
+                right.evaluate_plaintext(stored)
+            }
+            Predicate::Not(inner) => {
+                let v = inner.evaluate_plaintext(stored)?;
+                Some(!v)
+            }
+        }
+    }
 }
 
 /// Reference to a column in the encrypted data

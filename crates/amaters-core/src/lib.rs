@@ -83,6 +83,8 @@
 
 pub mod compute;
 pub mod error;
+pub mod memory_limiter;
+pub mod metrics;
 pub mod storage;
 pub mod traits;
 pub mod types;
@@ -91,6 +93,7 @@ pub mod validation;
 
 // Re-exports for convenience
 pub use error::{AmateRSError, ErrorContext, Result};
+pub use metrics::CoreMetrics;
 pub use traits::StorageEngine;
 pub use types::{CipherBlob, ColumnRef, Key, Predicate, Query, QueryBuilder, Update, col};
 

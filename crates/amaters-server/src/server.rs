@@ -12,6 +12,8 @@ use crate::health::{HealthChecker, HealthStatus};
 use crate::metrics::MetricsCollector;
 use crate::service::NetworkService;
 use crate::shutdown::ShutdownCoordinator;
+#[cfg(feature = "cluster")]
+use amaters_cluster::{NodeState, RaftConfig, RaftNode};
 use amaters_core::error::Result as CoreResult;
 use amaters_core::storage::{
     BlockCacheConfig, CompactionConfig, LsmTreeConfig, LsmTreeStorage, MemoryStorage,
@@ -133,6 +135,62 @@ pub enum ServerError {
 
 pub type ServerResult<T> = Result<T, ServerError>;
 
+/// Classify [`ServerError`] variants as transient (retriable) or permanent.
+///
+/// This implementation is deliberately conservative: only
+/// [`ServerError::DirectoryCreation`] with obviously transient I/O kinds is
+/// classified as transient.  String-typed variants (`Storage`, `Network`,
+/// `Cluster`) are kept permanent because their underlying cause cannot be
+/// determined without parsing the message.
+impl crate::retry::ErrorClassification for ServerError {
+    fn is_transient(&self) -> bool {
+        match self {
+            ServerError::DirectoryCreation(io_err) => {
+                // Only a small set of I/O error kinds can recover on retry.
+                matches!(
+                    io_err.kind(),
+                    std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                )
+            }
+            // Everything else is permanent: config errors, validation errors,
+            // shutdown timeouts, auth failures, etc.
+            ServerError::Config(_)
+            | ServerError::ConfigValidation(_)
+            | ServerError::Storage(_)
+            | ServerError::Network(_)
+            | ServerError::Cluster(_)
+            | ServerError::TlsSetup(_)
+            | ServerError::AlreadyRunning
+            | ServerError::ShutdownTimeout
+            | ServerError::Core(_) => false,
+        }
+    }
+}
+
+/// Cluster status information for monitoring
+#[cfg(feature = "cluster")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClusterStatus {
+    /// This node's ID
+    pub node_id: u64,
+    /// Current Raft state (Follower, Candidate, Leader)
+    pub state: String,
+    /// Current Raft term
+    pub current_term: u64,
+    /// Current leader ID (if known)
+    pub leader_id: Option<u64>,
+    /// Whether this node is the leader
+    pub is_leader: bool,
+    /// Commit index
+    pub commit_index: u64,
+    /// Last log index
+    pub last_log_index: u64,
+}
+
 /// Main server runtime
 pub struct Server {
     /// Server configuration
@@ -141,6 +199,9 @@ pub struct Server {
     storage: Option<Arc<Storage>>,
     /// Network service (AQL API)
     network: Option<NetworkService>,
+    /// Raft consensus node (when cluster feature is enabled)
+    #[cfg(feature = "cluster")]
+    cluster_node: Option<Arc<RaftNode>>,
     /// Shutdown coordinator
     shutdown: ShutdownCoordinator,
     /// Health checker
@@ -156,6 +217,8 @@ impl Server {
             config: Arc::new(config),
             storage: None,
             network: None,
+            #[cfg(feature = "cluster")]
+            cluster_node: None,
             shutdown: ShutdownCoordinator::new(),
             health: HealthChecker::new(),
             metrics: MetricsCollector::new(),
@@ -174,6 +237,10 @@ impl Server {
 
         // Initialize network service
         self.initialize_network().await?;
+
+        // Initialize cluster (if enabled)
+        #[cfg(feature = "cluster")]
+        self.initialize_cluster()?;
 
         // Initialize health checker
         self.health.set_status(HealthStatus::Starting);
@@ -250,7 +317,7 @@ impl Server {
 
         let sstable_config = SSTableConfig {
             block_size: 4096,
-            enable_compression: true,
+            compression_type: amaters_core::storage::CompressionType::Lz4,
         };
 
         let block_cache_config = BlockCacheConfig {
@@ -267,6 +334,7 @@ impl Server {
             level_multiplier: self.config.storage.compaction.level_multiplier,
             base_level_size: 10 * 1024 * 1024,       // 10 MB
             max_compaction_bytes: 100 * 1024 * 1024, // 100 MB
+            ..Default::default()
         };
 
         // Optional value log configuration for large values
@@ -311,11 +379,109 @@ impl Server {
         Ok(())
     }
 
+    /// Initialize the Raft cluster node from server configuration
+    #[cfg(feature = "cluster")]
+    fn initialize_cluster(&mut self) -> ServerResult<()> {
+        let cluster_settings = match self.config.cluster.as_ref() {
+            Some(settings) if settings.enabled => settings,
+            _ => {
+                info!("Cluster mode disabled, running as standalone node");
+                return Ok(());
+            }
+        };
+
+        info!(
+            "Initializing cluster node (node_id: {}, peers: {:?})",
+            cluster_settings.node_id, cluster_settings.peers
+        );
+
+        // Parse peer addresses into node IDs
+        // Peers format: "node_id:address" (e.g., "1:127.0.0.1:7879")
+        let mut peer_ids: Vec<u64> = Vec::new();
+        for peer_str in &cluster_settings.peers {
+            let parts: Vec<&str> = peer_str.splitn(2, ':').collect();
+            if parts.is_empty() {
+                return Err(ServerError::Cluster(format!(
+                    "Invalid peer format '{}', expected 'node_id:address'",
+                    peer_str
+                )));
+            }
+            let peer_id: u64 = parts[0].parse().map_err(|e| {
+                ServerError::Cluster(format!("Invalid peer node_id in '{}': {}", peer_str, e))
+            })?;
+            peer_ids.push(peer_id);
+        }
+
+        // Ensure self is included in peers list
+        if !peer_ids.contains(&cluster_settings.node_id) {
+            peer_ids.push(cluster_settings.node_id);
+        }
+
+        // Build RaftConfig from ClusterSettings
+        let mut raft_config = RaftConfig::new(cluster_settings.node_id, peer_ids);
+        raft_config.election_timeout_range = (
+            cluster_settings
+                .election_timeout_ms
+                .saturating_sub(cluster_settings.election_timeout_ms / 3),
+            cluster_settings
+                .election_timeout_ms
+                .saturating_add(cluster_settings.election_timeout_ms / 3),
+        );
+        raft_config.heartbeat_interval = cluster_settings.heartbeat_interval_ms;
+
+        let node = RaftNode::new(raft_config)
+            .map_err(|e| ServerError::Cluster(format!("Failed to create RaftNode: {}", e)))?;
+
+        self.cluster_node = Some(Arc::new(node));
+        self.health.set_cluster_enabled(true);
+        self.health.set_cluster_healthy(true);
+
+        info!(
+            "Cluster node initialized (node_id: {}, state: {})",
+            cluster_settings.node_id, "Follower"
+        );
+
+        Ok(())
+    }
+
+    /// Get the cluster node (if cluster feature is enabled and cluster is active)
+    #[cfg(feature = "cluster")]
+    pub fn cluster_node(&self) -> Option<&Arc<RaftNode>> {
+        self.cluster_node.as_ref()
+    }
+
+    /// Get cluster status information for health/monitoring
+    #[cfg(feature = "cluster")]
+    pub fn cluster_status(&self) -> Option<ClusterStatus> {
+        self.cluster_node.as_ref().map(|node| ClusterStatus {
+            node_id: node.node_id(),
+            state: node.state().as_str().to_string(),
+            current_term: node.current_term(),
+            leader_id: node.leader_id(),
+            is_leader: node.is_leader(),
+            commit_index: node.commit_index(),
+            last_log_index: node.last_log_index(),
+        })
+    }
+
     /// Start the server
     pub async fn start(&mut self) -> ServerResult<()> {
         info!("Starting AmateRS server v{}", env!("CARGO_PKG_VERSION"));
         info!("Bind address: {}", self.config.server.bind_address);
         info!("Data directory: {}", self.config.server.data_dir.display());
+
+        // Log cluster status
+        #[cfg(feature = "cluster")]
+        if let Some(ref node) = self.cluster_node {
+            info!(
+                "Cluster mode: enabled (node_id: {}, state: {}, term: {})",
+                node.node_id(),
+                node.state().as_str(),
+                node.current_term()
+            );
+        } else {
+            info!("Cluster mode: disabled (standalone)");
+        }
 
         // Start network service
         if let Some(ref mut network) = self.network {
@@ -605,5 +771,128 @@ mod tests {
 
         coordinator.shutdown();
         assert!(coordinator.is_shutting_down());
+    }
+
+    /// Test that server creation works without cluster config (default)
+    #[tokio::test]
+    async fn test_server_creation_without_cluster() {
+        let config = ServerConfig::default();
+        assert!(config.cluster.is_none());
+
+        let server = Server::new(config);
+        #[cfg(feature = "cluster")]
+        assert!(server.cluster_node.is_none());
+        assert_eq!(server.health_checker().status(), HealthStatus::Starting);
+    }
+
+    /// Test server initialization with cluster config enabled (3-node cluster)
+    #[cfg(feature = "cluster")]
+    #[tokio::test]
+    async fn test_server_creation_with_cluster_config() {
+        use crate::config::ClusterSettings;
+
+        let mut config = ServerConfig::default();
+        config.server.data_dir = env::temp_dir().join("amaters_test_cluster");
+        config.storage.engine = "memory".to_string();
+        config.cluster = Some(ClusterSettings {
+            enabled: true,
+            node_id: 1,
+            peers: vec![
+                "1:127.0.0.1:7879".to_string(),
+                "2:127.0.0.1:7880".to_string(),
+                "3:127.0.0.1:7881".to_string(),
+            ],
+            heartbeat_interval_ms: 50,
+            election_timeout_ms: 300,
+        });
+
+        let mut server = Server::new(config);
+        let result = server.initialize().await;
+        assert!(result.is_ok());
+
+        // Cluster node should be initialized
+        assert!(server.cluster_node.is_some());
+
+        // Cluster status should be available
+        let status = server.cluster_status();
+        assert!(status.is_some());
+        let status = status.expect("cluster status should exist");
+        assert_eq!(status.node_id, 1);
+        assert_eq!(status.state, "Follower");
+        assert_eq!(status.current_term, 0);
+        assert!(!status.is_leader);
+
+        // Health should reflect cluster is active
+        let health = server.health_checker().get_health();
+        let cluster_component = health
+            .components
+            .iter()
+            .find(|c| c.name == "cluster")
+            .expect("cluster component should exist");
+        assert_eq!(cluster_component.status, HealthStatus::Healthy);
+
+        // Cleanup
+        if server.config.server.data_dir.exists() {
+            fs::remove_dir_all(&server.config.server.data_dir).ok();
+        }
+    }
+
+    /// Test cluster config defaults and validation
+    #[test]
+    fn test_cluster_config_defaults() {
+        let config = ServerConfig::default();
+        // By default, cluster is None (disabled)
+        assert!(config.cluster.is_none());
+    }
+
+    /// Test cluster config validation: enabled but no peers should fail config validation
+    #[test]
+    fn test_cluster_config_validation() {
+        use crate::config::ClusterSettings;
+
+        let config = ServerConfig {
+            cluster: Some(ClusterSettings {
+                enabled: true,
+                node_id: 1,
+                peers: Vec::new(), // No peers - should fail validation
+                heartbeat_interval_ms: 50,
+                election_timeout_ms: 300,
+            }),
+            ..Default::default()
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+    }
+
+    /// Test that server works with cluster disabled even when config is present
+    #[cfg(feature = "cluster")]
+    #[tokio::test]
+    async fn test_server_cluster_disabled_explicitly() {
+        use crate::config::ClusterSettings;
+
+        let mut config = ServerConfig::default();
+        config.server.data_dir = env::temp_dir().join("amaters_test_cluster_disabled");
+        config.storage.engine = "memory".to_string();
+        config.cluster = Some(ClusterSettings {
+            enabled: false,
+            node_id: 1,
+            peers: Vec::new(),
+            heartbeat_interval_ms: 50,
+            election_timeout_ms: 300,
+        });
+
+        let mut server = Server::new(config);
+        let result = server.initialize().await;
+        assert!(result.is_ok());
+
+        // Cluster node should NOT be initialized
+        assert!(server.cluster_node.is_none());
+        assert!(server.cluster_status().is_none());
+
+        // Cleanup
+        if server.config.server.data_dir.exists() {
+            fs::remove_dir_all(&server.config.server.data_dir).ok();
+        }
     }
 }

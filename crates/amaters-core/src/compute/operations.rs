@@ -44,7 +44,7 @@ impl EncryptedBool {
 
     /// Serialize to CipherBlob
     pub fn to_cipher_blob(&self) -> Result<CipherBlob> {
-        let bytes = bincode::serialize(&self.inner).map_err(|e| {
+        let bytes = oxicode::serde::encode_serde(&self.inner).map_err(|e| {
             AmateRSError::Serialization(ErrorContext::new(format!(
                 "Failed to serialize EncryptedBool: {}",
                 e
@@ -55,7 +55,7 @@ impl EncryptedBool {
 
     /// Deserialize from CipherBlob
     pub fn from_cipher_blob(blob: &CipherBlob) -> Result<Self> {
-        let inner: FheBool = bincode::deserialize(blob.as_bytes()).map_err(|e| {
+        let inner: FheBool = oxicode::serde::decode_serde(blob.as_bytes()).map_err(|e| {
             AmateRSError::Deserialization(ErrorContext::new(format!(
                 "Failed to deserialize EncryptedBool: {}",
                 e
@@ -126,7 +126,7 @@ impl EncryptedU8 {
 
     /// Serialize to CipherBlob
     pub fn to_cipher_blob(&self) -> Result<CipherBlob> {
-        let bytes = bincode::serialize(&self.inner).map_err(|e| {
+        let bytes = oxicode::serde::encode_serde(&self.inner).map_err(|e| {
             AmateRSError::Serialization(ErrorContext::new(format!(
                 "Failed to serialize EncryptedU8: {}",
                 e
@@ -137,7 +137,7 @@ impl EncryptedU8 {
 
     /// Deserialize from CipherBlob
     pub fn from_cipher_blob(blob: &CipherBlob) -> Result<Self> {
-        let inner: FheUint8 = bincode::deserialize(blob.as_bytes()).map_err(|e| {
+        let inner: FheUint8 = oxicode::serde::decode_serde(blob.as_bytes()).map_err(|e| {
             AmateRSError::Deserialization(ErrorContext::new(format!(
                 "Failed to deserialize EncryptedU8: {}",
                 e
@@ -238,7 +238,7 @@ impl EncryptedU16 {
     }
 
     pub fn to_cipher_blob(&self) -> Result<CipherBlob> {
-        let bytes = bincode::serialize(&self.inner).map_err(|e| {
+        let bytes = oxicode::serde::encode_serde(&self.inner).map_err(|e| {
             AmateRSError::Serialization(ErrorContext::new(format!(
                 "Failed to serialize EncryptedU16: {}",
                 e
@@ -248,7 +248,7 @@ impl EncryptedU16 {
     }
 
     pub fn from_cipher_blob(blob: &CipherBlob) -> Result<Self> {
-        let inner: FheUint16 = bincode::deserialize(blob.as_bytes()).map_err(|e| {
+        let inner: FheUint16 = oxicode::serde::decode_serde(blob.as_bytes()).map_err(|e| {
             AmateRSError::Deserialization(ErrorContext::new(format!(
                 "Failed to deserialize EncryptedU16: {}",
                 e
@@ -340,7 +340,7 @@ impl EncryptedU32 {
     }
 
     pub fn to_cipher_blob(&self) -> Result<CipherBlob> {
-        let bytes = bincode::serialize(&self.inner).map_err(|e| {
+        let bytes = oxicode::serde::encode_serde(&self.inner).map_err(|e| {
             AmateRSError::Serialization(ErrorContext::new(format!(
                 "Failed to serialize EncryptedU32: {}",
                 e
@@ -350,7 +350,7 @@ impl EncryptedU32 {
     }
 
     pub fn from_cipher_blob(blob: &CipherBlob) -> Result<Self> {
-        let inner: FheUint32 = bincode::deserialize(blob.as_bytes()).map_err(|e| {
+        let inner: FheUint32 = oxicode::serde::decode_serde(blob.as_bytes()).map_err(|e| {
             AmateRSError::Deserialization(ErrorContext::new(format!(
                 "Failed to deserialize EncryptedU32: {}",
                 e
@@ -442,7 +442,7 @@ impl EncryptedU64 {
     }
 
     pub fn to_cipher_blob(&self) -> Result<CipherBlob> {
-        let bytes = bincode::serialize(&self.inner).map_err(|e| {
+        let bytes = oxicode::serde::encode_serde(&self.inner).map_err(|e| {
             AmateRSError::Serialization(ErrorContext::new(format!(
                 "Failed to serialize EncryptedU64: {}",
                 e
@@ -452,7 +452,7 @@ impl EncryptedU64 {
     }
 
     pub fn from_cipher_blob(blob: &CipherBlob) -> Result<Self> {
-        let inner: FheUint64 = bincode::deserialize(blob.as_bytes()).map_err(|e| {
+        let inner: FheUint64 = oxicode::serde::decode_serde(blob.as_bytes()).map_err(|e| {
             AmateRSError::Deserialization(ErrorContext::new(format!(
                 "Failed to deserialize EncryptedU64: {}",
                 e

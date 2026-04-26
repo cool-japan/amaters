@@ -7,8 +7,9 @@ use amaters_core::storage::{
     SSTableConfig, SSTableReader, SSTableWriter,
 };
 use amaters_core::types::{CipherBlob, Key};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::env;
+use std::hint::black_box;
 
 fn bench_memtable_put(c: &mut Criterion) {
     let mut group = c.benchmark_group("memtable_put");
@@ -421,7 +422,7 @@ fn bench_sstable_block_sizes(c: &mut Criterion) {
                     let path = dir.join(format!("bench_sstable_block_{}.sst", block_size));
                     let config = SSTableConfig {
                         block_size,
-                        enable_compression: false,
+                        compression_type: amaters_core::storage::CompressionType::None,
                     };
                     let mut writer =
                         SSTableWriter::new(&path, config).expect("benchmark operation failed");

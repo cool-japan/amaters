@@ -1,7 +1,7 @@
 //! Client wrapper for AmateRS SDK
 
 use amaters_core::{CipherBlob, Key};
-use amaters_sdk_rust::{AmateRSClient, SdkError};
+use amaters_sdk_rust::{AmateRSClient, PaginatedResult, PaginationConfig, SdkError};
 use anyhow::Context;
 
 /// CLI client wrapper
@@ -43,6 +43,29 @@ impl Client {
         self.inner.range(&self.default_collection, start, end).await
     }
 
+    /// Range query with cursor-based pagination.
+    pub async fn range_paginated(
+        &self,
+        start: &Key,
+        end: &Key,
+        pagination: &PaginationConfig,
+    ) -> Result<PaginatedResult<(Key, CipherBlob)>, SdkError> {
+        self.inner
+            .range_with_cursor(&self.default_collection, start, end, pagination)
+            .await
+    }
+
+    /// Prefix scan with cursor-based pagination.
+    pub async fn scan(
+        &self,
+        prefix: &Key,
+        pagination: &PaginationConfig,
+    ) -> Result<PaginatedResult<(Key, CipherBlob)>, SdkError> {
+        self.inner
+            .scan(&self.default_collection, prefix, pagination)
+            .await
+    }
+
     /// Query with filter (advanced FHE filtering)
     ///
     /// Note: This requires FHE server keys to be registered.
@@ -59,6 +82,11 @@ impl Client {
     /// Health check
     pub async fn health_check(&self) -> Result<(), SdkError> {
         self.inner.health_check().await
+    }
+
+    /// Get server information
+    pub async fn server_info(&self) -> Result<amaters_sdk_rust::ServerInfo, SdkError> {
+        self.inner.server_info().await
     }
 }
 

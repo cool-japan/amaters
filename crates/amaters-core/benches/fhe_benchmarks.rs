@@ -9,8 +9,9 @@ use amaters_core::compute::{
     EncryptedU64, FheExecutor, FheKeyPair, PredicateCompiler,
 };
 use amaters_core::types::{CipherBlob, Predicate};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::collections::HashMap;
+use std::hint::black_box;
 
 /// Benchmark FHE encryption operations
 fn bench_fhe_encrypt(c: &mut Criterion) {

@@ -58,7 +58,7 @@ impl BloomFilter {
         let num_hash_functions =
             Self::optimal_num_hash_functions(num_bits, config.expected_elements);
 
-        let num_bytes = (num_bits + 7) / 8; // Round up to nearest byte
+        let num_bytes = num_bits.div_ceil(8); // Round up to nearest byte
         let bits = vec![0u8; num_bytes];
 
         Self {
@@ -76,7 +76,7 @@ impl BloomFilter {
         num_hash_functions: usize,
         num_elements: usize,
     ) -> Result<Self> {
-        let expected_bytes = (num_bits + 7) / 8;
+        let expected_bytes = num_bits.div_ceil(8);
         if data.len() != expected_bytes {
             return Err(AmateRSError::ValidationError(ErrorContext::new(format!(
                 "Invalid bloom filter size: expected {} bytes, got {}",
@@ -104,7 +104,7 @@ impl BloomFilter {
 
         // Round up to nearest multiple of 8 (byte boundary)
         let num_bits = num_bits.ceil() as usize;
-        ((num_bits + 7) / 8) * 8
+        num_bits.div_ceil(8) * 8
     }
 
     /// Calculate optimal number of hash functions

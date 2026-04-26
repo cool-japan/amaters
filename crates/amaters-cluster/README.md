@@ -2,173 +2,175 @@
 
 Consensus layer for AmateRS (Ukehi - The Sacred Pledge)
 
+[![Alpha](https://img.shields.io/badge/status-alpha-orange)](https://github.com/cool-japan/amaters)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
+[![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-blue)](Cargo.toml)
+
 ## Overview
 
-`amaters-cluster` implements distributed consensus and cluster management for AmateRS using the **Ukehi** component. It ensures data consistency and fault tolerance across multiple nodes using Raft consensus with encrypted log entries.
+`amaters-cluster` implements distributed consensus and cluster management for AmateRS using the **Ukehi** component. It provides a complete Raft consensus implementation with joint consensus membership changes, a batch-apply state machine with snapshotting, consistent hashing for data partitioning, and full node lifecycle management.
 
-## Features
+**Status**: Alpha — 257 tests, 245 public items.
 
-- **Raft Consensus**: Leader election and log replication
-- **Encrypted Logs**: Server cannot read log contents (FHE)
-- **Sharding**: Data partitioning by key ranges
-- **Dynamic Rebalancing**: Automatic data redistribution
-- **Fault Tolerance**: Continues with (N-1)/2 failures
+## Implemented Features
+
+### Raft Consensus
+
+A complete, from-scratch Raft consensus implementation:
+
+- **Leader election** — randomized election timeouts, vote request and grant logic, term management
+- **Log replication** — AppendEntries RPC, log consistency checks via prev_log_index/term, quorum-based commit index advancement
+- **Joint consensus** — safe cluster membership changes using the two-phase joint consensus protocol (C_old,new → C_new)
+- **Safety guarantees** — election safety (at most one leader per term), leader append-only, log matching, state machine safety
+
+### State Machine
+
+- Batch apply of committed log entries for throughput efficiency
+- Pluggable state machine interface for application-defined command execution
+- Snapshotting support: create, store, and restore snapshots to compact the Raft log
+
+### Consistent Hashing Partitioner
+
+- Virtual node (vnodes) consistent hash ring for even key distribution
+- Minimal key movement when adding or removing nodes
+- Configurable replication factor
+
+### Snapshot Management
+
+- Snapshot creation triggered by configurable log size thresholds
+- Snapshot storage and retrieval
+- Snapshot transfer to joining or lagging followers
+- Log truncation after successful snapshot
+
+### Write-Ahead Log (WAL v2)
+
+- WAL v2 format (magic `0x57414C32`) with per-entry 8-byte fencing token in the entry header
+- Backward-compatible WAL v1 read path for rolling upgrades
+- CRC32 integrity verification on every entry read
+- `CorruptionPolicy` applied on CRC mismatch: `TruncateToLastGood` (default), `RefuseStart`, or `AlertAndContinue`
+- WAL replay on `Node::start()` — committed entries replayed into the state machine before accepting RPCs; RPC handlers reject requests while `is_recovering` is set
+
+### Fencing Tokens
+
+- `FencingToken` — packed `u64` with term in high 32 bits and sequence in low 32 bits, backed by `AtomicU64` for lock-free access
+- `new(term, seq)`, `term()`, `seq()`, `bump_seq()`, `new_leader_term()` constructors/helpers
+- `FencingTokenState` in the cluster state — `issue_token()` stamps each write; `bump_term_token()` resets sequence on leadership change
+- Storage layer rejects writes carrying a stale token, preventing split-brain writes
+- Token embedded in every WAL v2 entry header so it survives restarts
+
+### Node Management and Membership Changes
+
+- Node lifecycle: start, stop, step-down, transfer leadership
+- Dynamic membership changes via joint consensus
+- Add and remove peers without cluster downtime
+- Membership configuration persisted in the Raft log
 
 ## Architecture
 
 ```
-                    Cluster
-         ┌──────────────────────────┐
-         │  [Ukehi - Consensus]     │
-         │                          │
-    ┌────┴────┐  ┌────────┐  ┌────┴────┐
-    │ Leader  │  │Follower│  │Follower │
-    │ Node 1  │←→│ Node 2 │←→│ Node 3  │
-    └────┬────┘  └────────┘  └────┬────┘
-         │                         │
-    ┌────▼────┐              ┌────▼────┐
-    │ Shard A │              │ Shard B │
-    │ Keys    │              │ Keys    │
-    │ 0-50%   │              │ 50-100% │
-    └─────────┘              └─────────┘
+                    Cluster (Ukehi)
+         ┌────────────────────────────────────┐
+         │  Raft Consensus Engine             │
+         │  ├── Leader Election               │
+         │  ├── Log Replication               │
+         │  ├── Joint Consensus Membership    │
+         │  └── Snapshot Management           │
+         │                                    │
+    ┌────┴────┐    ┌────────┐    ┌────────────┴─┐
+    │ Leader  │    │Follower│    │  Follower    │
+    │ Node 1  │←──→│ Node 2 │←──→│  Node 3      │
+    └────┬────┘    └────────┘    └──────────────┘
+         │
+    ┌────▼──────────────────────────────────────┐
+    │  State Machine (Batch Apply)               │
+    │  ├── Command Execution                     │
+    │  ├── Snapshot Creation / Restoration       │
+    │  └── Consistent Hash Partitioner           │
+    └───────────────────────────────────────────┘
 ```
 
-## Components
-
-### Raft Consensus
-- **Leader Election**: Automatic leader selection
-- **Log Replication**: Replicate encrypted operations
-- **Snapshot Management**: Compact logs periodically
-- **Membership Changes**: Add/remove nodes safely
-
-### Sharding
-- **Placement Driver (PD)**: Centralized shard coordinator
-- **Key Range Partitioning**: Divide keyspace into regions
-- **Load Balancing**: Monitor and rebalance shards
-- **Split/Merge**: Handle hot spots and cold regions
-
-### Verification
-- **Hash Verification**: Integrity checks on encrypted logs
-- **ZK-SNARKs**: Prove computation correctness (future)
-
-## Usage (Future)
-
-```rust
-use amaters_cluster::{Cluster, Node, Config};
-
-// Create a 3-node cluster
-let config = Config {
-    node_id: "node-1",
-    peers: vec!["node-2:7878", "node-3:7878"],
-    data_dir: "/var/lib/amaters",
-};
-
-let node = Node::new(config).await?;
-node.start().await?;
-
-// Cluster operations
-if node.is_leader().await? {
-    // Perform leader operations
-    node.propose_entry(entry).await?;
-}
-```
-
-## Configuration
-
-```toml
-[cluster]
-node_id = "node-1"
-peers = ["node-2:7878", "node-3:7878"]
-
-[raft]
-election_timeout_ms = 1000
-heartbeat_interval_ms = 100
-max_log_entries = 10000
-snapshot_interval = 1000
-
-[sharding]
-num_shards = 16
-rebalance_threshold = 0.2  # 20% imbalance
-split_threshold_mb = 512
-merge_threshold_mb = 64
-```
-
-## Consensus Properties
+## Raft Properties
 
 ### Safety
-- **Leader Election Safety**: At most one leader per term
-- **Log Matching**: Logs are consistent across nodes
-- **State Machine Safety**: All nodes execute commands in same order
+- **Election Safety**: At most one leader elected per term
+- **Leader Append-Only**: Log entries are never deleted from a leader
+- **Log Matching**: If two logs have an entry with the same index and term, all preceding entries are identical
+- **State Machine Safety**: All nodes apply the same commands in the same order
 
 ### Liveness
-- **Eventual Leader Election**: New leader elected within timeout
-- **Progress**: Cluster makes progress if majority available
+- **Eventual Leader Election**: A new leader is elected within the configured election timeout
+- **Progress**: The cluster makes progress when a majority of nodes are available
 
-### Encryption Challenges
-- **Encrypted Logs**: Cannot read log contents for debugging
-- **Verification**: Use hashes and ZKPs to verify integrity
-- **Performance**: FHE operations slower than plaintext
+### Fault Tolerance
 
-## Fault Tolerance
+| Cluster Size | Max Node Failures | Quorum Required |
+|---|---|---|
+| 3 nodes | 1 | 2 |
+| 5 nodes | 2 | 3 |
+| 7 nodes | 3 | 4 |
 
-| Cluster Size | Max Failures | Quorum |
-|--------------|--------------|--------|
-| 3 nodes      | 1 failure    | 2      |
-| 5 nodes      | 2 failures   | 3      |
-| 7 nodes      | 3 failures   | 4      |
+Formula: Quorum = floor(N / 2) + 1
 
-Formula: Quorum = (N + 1) / 2
+## Usage
 
-## Performance
+```rust
+use amaters_cluster::{RaftNode, RaftConfig, StateMachine};
 
-### Raft Benchmarks (Target)
-- **Leader Election**: < 1 second
-- **Log Replication**: < 10ms latency
-- **Throughput**: > 10K ops/sec
+let config = RaftConfig {
+    node_id: "node-1".into(),
+    peers: vec!["node-2:7878".into(), "node-3:7878".into()],
+    election_timeout_min_ms: 150,
+    election_timeout_max_ms: 300,
+    heartbeat_interval_ms: 50,
+    snapshot_threshold: 10_000,
+    ..Default::default()
+};
 
-### Sharding Benchmarks (Target)
-- **Shard Split**: < 5 seconds
-- **Shard Merge**: < 3 seconds
-- **Rebalancing**: < 60 seconds
+let state_machine = MyStateMachine::new();
+let node = RaftNode::new(config, state_machine).await?;
+node.start().await?;
 
-## Development Status
+// Propose a command (leader only)
+if node.is_leader().await {
+    node.propose(command_bytes).await?;
+}
 
-- 📋 **Phase 1**: Raft implementation
-- 📋 **Phase 2**: Encrypted log entries
-- 📋 **Phase 3**: Sharding & placement
-- 📋 **Phase 4**: ZK proof verification
-- 📋 **Phase 5**: Production hardening
+// Membership change
+node.add_peer("node-4:7878").await?;
+```
+
+## Consistent Hashing
+
+```rust
+use amaters_cluster::ConsistentHashPartitioner;
+
+let mut ring = ConsistentHashPartitioner::new(150); // 150 virtual nodes per peer
+ring.add_node("node-1");
+ring.add_node("node-2");
+ring.add_node("node-3");
+
+let responsible_node = ring.get_node(b"my-document-key")?;
+```
 
 ## Testing
 
 ```bash
-# Run unit tests
+# Run all tests (257 total)
+cargo nextest run --all-features
+
+# Unit tests only
 cargo test
-
-# Chaos tests (simulate failures)
-cargo test --test chaos -- --ignored
-
-# Benchmarks
-cargo bench
 ```
 
 ## Dependencies
 
-- `raft` - Raft consensus library
-- `amaters-core` - Core types and storage
-- `amaters-net` - Network communication
-- `tokio` - Async runtime
-
-## Security Considerations
-
-- Logs are encrypted, server cannot read
-- Hash-based integrity verification
-- Future: ZK-SNARKs for computation proofs
-- Byzantine fault tolerance not supported (use BFT for that)
+- `amaters-core` — core types and storage interfaces
+- `amaters-net` — network communication for Raft RPCs
+- `tokio` — async runtime
 
 ## License
 
-Licensed under MIT OR Apache-2.0
+Licensed under Apache-2.0
 
 ## Authors
 

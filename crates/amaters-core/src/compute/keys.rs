@@ -65,7 +65,7 @@ impl FheKeyPair {
 
     /// Serialize client key to bytes
     pub fn serialize_client_key(&self) -> Result<Vec<u8>> {
-        bincode::serialize(&self.client_key).map_err(|e| {
+        oxicode::serde::encode_serde(&self.client_key).map_err(|e| {
             AmateRSError::Serialization(ErrorContext::new(format!(
                 "Failed to serialize client key: {}",
                 e
@@ -75,7 +75,7 @@ impl FheKeyPair {
 
     /// Serialize server key to bytes
     pub fn serialize_server_key(&self) -> Result<Vec<u8>> {
-        bincode::serialize(&self.server_key).map_err(|e| {
+        oxicode::serde::encode_serde(&self.server_key).map_err(|e| {
             AmateRSError::Serialization(ErrorContext::new(format!(
                 "Failed to serialize server key: {}",
                 e
@@ -85,7 +85,7 @@ impl FheKeyPair {
 
     /// Deserialize client key from bytes
     pub fn deserialize_client_key(bytes: &[u8]) -> Result<tfhe::ClientKey> {
-        bincode::deserialize(bytes).map_err(|e| {
+        oxicode::serde::decode_serde(bytes).map_err(|e| {
             AmateRSError::Deserialization(ErrorContext::new(format!(
                 "Failed to deserialize client key: {}",
                 e
@@ -95,7 +95,7 @@ impl FheKeyPair {
 
     /// Deserialize server key from bytes
     pub fn deserialize_server_key(bytes: &[u8]) -> Result<tfhe::ServerKey> {
-        bincode::deserialize(bytes).map_err(|e| {
+        oxicode::serde::decode_serde(bytes).map_err(|e| {
             AmateRSError::Deserialization(ErrorContext::new(format!(
                 "Failed to deserialize server key: {}",
                 e

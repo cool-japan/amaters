@@ -1,6 +1,7 @@
 [package]
 name = "amaters-core"
 description = "Core kernel for AmateRS - Fully Homomorphic Encrypted Database"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,8 +24,7 @@ futures = { workspace = true }
 
 # Serialization
 rkyv = { workspace = true }
-oxicode = { workspace = true }
-bincode = { workspace = true, optional = true }
+oxicode = { workspace = true, optional = true }
 
 # Error handling
 thiserror = { workspace = true }
@@ -41,14 +41,22 @@ crossbeam = { workspace = true }
 bytemuck = { workspace = true }
 memmap2 = { workspace = true, optional = true }
 crc32fast = { workspace = true }
+oxiarc-lz4 = { workspace = true }
+oxiarc-deflate = { workspace = true }
 blake3 = { workspace = true }
+num_cpus = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+# Serialization (for backup metadata)
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
 
 [dev-dependencies]
+anyhow = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 approx = { workspace = true }
@@ -58,7 +66,7 @@ criterion = { workspace = true }
 [features]
 default = ["storage", "compute"]
 storage = []
-compute = ["tfhe", "bincode"]
+compute = ["tfhe", "oxicode"]
 parallel = ["rayon"]
 mmap = ["memmap2"]
 gpu = []

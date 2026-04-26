@@ -41,20 +41,28 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod auth;
 pub mod balancer;
 pub mod circuit_breaker;
 pub mod client;
 pub mod convert;
 pub mod error;
 pub mod grpc_service;
+pub mod metrics_layer;
 pub mod pool;
+pub mod rate_limiter;
 pub mod server;
+pub mod tracing_middleware;
 
 // mTLS module (feature-gated)
 #[cfg(feature = "mtls")]
 pub mod mtls;
 #[cfg(feature = "mtls")]
+pub mod ocsp;
+#[cfg(feature = "mtls")]
 pub mod tls;
+#[cfg(feature = "mtls")]
+pub mod tls_crypto;
 
 // Include the generated protocol buffer code
 pub mod proto {
@@ -82,7 +90,7 @@ pub mod proto {
 
 // Re-exports for convenience
 pub use error::{NetError, NetResult};
-pub use server::{AqlServerBuilder, AqlServiceImpl};
+pub use server::{AqlServerBuilder, AqlServiceImpl, StreamConfig};
 
 // mTLS re-exports
 #[cfg(feature = "mtls")]
@@ -101,7 +109,7 @@ pub use tls::{
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Protocol version
-pub const PROTOCOL_VERSION: (u32, u32, u32) = (0, 1, 0);
+pub const PROTOCOL_VERSION: (u32, u32, u32) = (0, 2, 0);
 
 #[cfg(test)]
 mod tests {
@@ -116,6 +124,6 @@ mod tests {
 
     #[test]
     fn test_protocol_version() {
-        assert_eq!(PROTOCOL_VERSION, (0, 1, 0));
+        assert_eq!(PROTOCOL_VERSION, (0, 2, 0));
     }
 }

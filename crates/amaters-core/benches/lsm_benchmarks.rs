@@ -8,8 +8,9 @@ use amaters_core::storage::{
     WalReader,
 };
 use amaters_core::types::{CipherBlob, Key};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::env;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
@@ -393,7 +394,7 @@ fn bench_sstable_block_sizes(c: &mut Criterion) {
                         dir.join(format!("bench_block_size_{}_{}.sst", block_size, unique_id));
                     let config = SSTableConfig {
                         block_size,
-                        enable_compression: false,
+                        compression_type: amaters_core::storage::CompressionType::None,
                     };
                     let mut writer =
                         SSTableWriter::new(&path, config).expect("failed to create SSTable writer");

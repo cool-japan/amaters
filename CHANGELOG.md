@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-04-26
+
+### Added
+
+#### Query Engine
+- **UPDATE query support**: Predicate-based filtering with atomic rollback on failure
+- **Query result caching**: LRU eviction policy with write-through invalidation to keep cached results consistent
+- **SDK pagination**: Cursor-based navigation with configurable page size and multi-field sorting
+
+#### Security & TLS
+- **OCSP certificate revocation checking**: Full RFC 6960 implementation for real-time certificate status validation
+- **JWT algorithm expansion**: Added HS384, HS512, RS384, RS512, ES256, ES384, and EdDSA in addition to the original HS256/RS256/ES256 set
+- **TLS client builder**: Fluent builder API for mTLS configuration including client certificate and private key loading
+- **Encrypted PEM key decryption**: Support for password-protected private keys in PKCS#8 and legacy PEM formats (PKCS#1, SEC1)
+
+#### Network & Transport
+- **Native HTTP/1.1 transport for TypeScript SDK**: Pure Node.js `http`/`https` transport replacing the gRPC-only path, enabling browser and edge environments
+- **Graceful shutdown hooks**: Ordered teardown sequence — WAL writer flush, memtable compaction, connection drain — to prevent data loss on SIGTERM/SIGINT
+
+#### Distributed Systems
+- **Raft state machine**: Batch apply of committed log entries and snapshotting support for faster follower catch-up
+
+#### Storage & GC
+- **Background GC worker**: Periodic value log compaction to reclaim space from deleted and overwritten WiscKey values
+
+#### CLI & Server
+- **Shell completion generation**: `amaters-cli completions` subcommand producing scripts for Bash, Zsh, Fish, PowerShell, and Elvish
+- **Health check HTTP endpoint**: Standalone HTTP handler for `/health`, `/readyz`, `/livez`, and `/metrics` alongside the existing gRPC health service
+
+#### GPU Acceleration
+- **GPU device detection**: Runtime probing for Metal (macOS) and CUDA (Linux) devices; detection result exposed via config and metrics
+
+#### FHE Examples
+- **Credit scoring example**: End-to-end FHE application computing a credit risk score over encrypted financial attributes
+- **Healthcare genomics example**: Encrypted genomic variant analysis without exposing raw sequence data
+- **Supply chain example**: Privacy-preserving provenance verification over encrypted supply chain records
+
+### Changed
+
+- **Rust edition upgraded to 2024** and `rust-version` bumped to `1.85`
+- **License changed to Apache-2.0 only**: Dual MIT/Apache-2.0 licensing dropped in favour of Apache-2.0 exclusively, aligned with COOLJAPAN Policy 2026+
+- **Benchmark harness**: Replaced `criterion::black_box` with `std::hint::black_box` throughout all benchmark targets
+
+### Fixed
+
+- **Zero-warning policy**: Resolved all outstanding `cargo clippy` diagnostics across the workspace
+- **Doc build collision**: Eliminated conflicting `--document-private-items` flags between the `amaters` and `amaters-sdk-python` crates that caused rustdoc to overwrite output
+- **Broken intra-doc links**: Fixed unresolved `[item]` references in SDK client module and metrics module doc comments
+
+### Migration Guide
+
+#### From 0.1.0
+
+- The `LicenseInfo` field in server metadata now reports `Apache-2.0` instead of `MIT OR Apache-2.0`; update any client-side string comparisons accordingly.
+- Benchmark binaries referencing `criterion::black_box` must be updated to `std::hint::black_box` (or `use std::hint::black_box as black_box`).
+- Clients relying on the TypeScript SDK's gRPC-only code path may now opt into the new HTTP/1.1 transport via `AmateRSClientOptions.transport = "http1"`.
+
+---
+
 ## [0.1.0] - 2026-01-18
 
 ### Added
@@ -307,4 +366,5 @@ This is the first release (0.1.0), no migration needed.
 
 No unreleased changes yet.
 
+[0.2.0]: https://github.com/cool-japan/amaters/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cool-japan/amaters/releases/tag/v0.1.0

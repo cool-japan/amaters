@@ -234,6 +234,102 @@ pub fn print_range_result(results: &[(Key, CipherBlob)], format: OutputFormat) -
     Ok(())
 }
 
+/// Print a paginated range query result, optionally showing the next cursor.
+pub fn print_paginated_result(
+    results: &[(Key, CipherBlob)],
+    next_cursor: Option<&str>,
+    format: OutputFormat,
+) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            let items: Vec<_> = results
+                .iter()
+                .map(|(key, blob)| {
+                    serde_json::json!({
+                        "key": key.to_string_lossy(),
+                        "size": blob.len(),
+                        "checksum": blob.metadata().checksum,
+                        "created_at": blob.metadata().created_at.to_rfc3339(),
+                    })
+                })
+                .collect();
+
+            let mut output = serde_json::json!({
+                "status": "success",
+                "operation": "range",
+                "count": results.len(),
+                "results": items,
+                "has_more": next_cursor.is_some(),
+            });
+            if let Some(cursor) = next_cursor {
+                output["next_cursor"] = serde_json::Value::String(cursor.to_string());
+            }
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        OutputFormat::Yaml => {
+            let items: Vec<_> = results
+                .iter()
+                .map(|(key, blob)| {
+                    serde_json::json!({
+                        "key": key.to_string_lossy(),
+                        "size": blob.len(),
+                        "checksum": blob.metadata().checksum,
+                        "created_at": blob.metadata().created_at.to_rfc3339(),
+                    })
+                })
+                .collect();
+
+            let mut output = serde_json::json!({
+                "status": "success",
+                "operation": "range",
+                "count": results.len(),
+                "results": items,
+                "has_more": next_cursor.is_some(),
+            });
+            if let Some(cursor) = next_cursor {
+                output["next_cursor"] = serde_json::Value::String(cursor.to_string());
+            }
+            println!("{}", serde_yaml::to_string(&output)?);
+        }
+        OutputFormat::Table => {
+            if results.is_empty() {
+                println!("No results found");
+            } else {
+                let mut table = Table::new();
+                table.set_header(vec![
+                    Cell::new("Key").fg(Color::Cyan),
+                    Cell::new("Size").fg(Color::Cyan),
+                    Cell::new("Checksum").fg(Color::Cyan),
+                    Cell::new("Created At").fg(Color::Cyan),
+                ]);
+
+                for (key, blob) in results {
+                    table.add_row(vec![
+                        Cell::new(key.to_string_lossy()),
+                        Cell::new(format!("{} bytes", blob.len()))
+                            .set_alignment(CellAlignment::Right),
+                        Cell::new(format!("{:#x}", blob.metadata().checksum)),
+                        Cell::new(
+                            blob.metadata()
+                                .created_at
+                                .format("%Y-%m-%d %H:%M:%S")
+                                .to_string(),
+                        ),
+                    ]);
+                }
+
+                println!("{table}");
+                println!("\nTotal: {} results", results.len());
+            }
+
+            if let Some(cursor) = next_cursor {
+                println!("Next cursor: {}", cursor);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Print an error message
 pub fn print_error(error: &anyhow::Error, format: OutputFormat) {
     match format {

@@ -107,16 +107,26 @@ message BatchResult {
 message StreamResponse {
   // Chunk of results
   oneof chunk {
-    // Key-value pair
+    // Single key-value pair (legacy, one item per message)
     amaters.query.KeyValue value = 1;
     // Error response
     amaters.errors.ErrorResponse error = 2;
     // End of stream marker
     StreamEnd end = 3;
+    // Batched key-value pairs (chunked streaming)
+    StreamBatch batch = 5;
   }
 
   // Sequence number for ordering
   uint64 sequence = 4;
+}
+
+// Batched key-value pairs for chunked streaming
+message StreamBatch {
+  // Key-value pairs in this chunk
+  repeated amaters.query.KeyValue values = 1;
+  // Whether more chunks follow
+  bool has_more = 2;
 }
 
 // End of stream marker

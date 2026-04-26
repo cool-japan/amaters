@@ -120,10 +120,53 @@ impl ConnectionPool {
 
         // Configure TLS if enabled
         if self.config.tls_enabled {
-            if let Some(_tls_config) = &self.config.tls_config {
-                // TODO: Configure TLS when needed
-                // For now, just use the endpoint as-is
-                debug!("TLS configuration requested but not yet implemented");
+            if let Some(tls_config) = &self.config.tls_config {
+                let mut client_tls = tonic::transport::ClientTlsConfig::new();
+
+                // Set domain name for SNI if provided
+                if let Some(domain) = &tls_config.domain_name {
+                    client_tls = client_tls.domain_name(domain.clone());
+                }
+
+                // Load CA certificate if provided
+                if let Some(ca_path) = &tls_config.ca_cert_path {
+                    let ca_pem = std::fs::read(ca_path).map_err(|e| {
+                        SdkError::Configuration(format!(
+                            "failed to read CA certificate at {}: {}",
+                            ca_path.display(),
+                            e
+                        ))
+                    })?;
+                    let ca_cert = tonic::transport::Certificate::from_pem(ca_pem);
+                    client_tls = client_tls.ca_certificate(ca_cert);
+                }
+
+                // Load client certificate and key for mTLS if provided
+                if let (Some(cert_path), Some(key_path)) =
+                    (&tls_config.client_cert_path, &tls_config.client_key_path)
+                {
+                    let cert_pem = std::fs::read(cert_path).map_err(|e| {
+                        SdkError::Configuration(format!(
+                            "failed to read client certificate at {}: {}",
+                            cert_path.display(),
+                            e
+                        ))
+                    })?;
+                    let key_pem = std::fs::read(key_path).map_err(|e| {
+                        SdkError::Configuration(format!(
+                            "failed to read client key at {}: {}",
+                            key_path.display(),
+                            e
+                        ))
+                    })?;
+                    let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+                    client_tls = client_tls.identity(identity);
+                }
+
+                endpoint = endpoint.tls_config(client_tls).map_err(|e| {
+                    SdkError::Configuration(format!("failed to configure TLS: {}", e))
+                })?;
+                debug!("TLS configured successfully");
             }
         }
 
@@ -235,5 +278,58 @@ mod tests {
         assert_eq!(stats.total_connections, 0);
         assert_eq!(stats.active_connections, 0);
         assert_eq!(stats.max_connections, 10);
+    }
+
+    #[test]
+    fn test_tls_config_construction() {
+        use crate::config::TlsConfig;
+
+        // Test building a config with TLS enabled but no cert files
+        // (cannot actually connect, but verifies config construction)
+        let tls = TlsConfig::new().with_domain_name("example.com");
+
+        let config = ClientConfig::new("https://example.com:50051").with_tls(tls);
+
+        assert!(config.tls_enabled);
+        assert!(config.tls_config.is_some());
+
+        let tls_cfg = config
+            .tls_config
+            .as_ref()
+            .expect("tls_config should be Some");
+        assert_eq!(tls_cfg.domain_name, Some("example.com".to_string()));
+        assert!(tls_cfg.ca_cert_path.is_none());
+        assert!(tls_cfg.client_cert_path.is_none());
+        assert!(tls_cfg.client_key_path.is_none());
+    }
+
+    #[test]
+    fn test_tls_config_with_mtls_paths() {
+        use crate::config::TlsConfig;
+
+        let tls = TlsConfig::new()
+            .with_ca_cert("/path/to/ca.pem")
+            .with_client_cert("/path/to/client.pem", "/path/to/client.key")
+            .with_domain_name("db.example.com");
+
+        let config = ClientConfig::new("https://db.example.com:50051").with_tls(tls);
+
+        assert!(config.tls_enabled);
+        let tls_cfg = config
+            .tls_config
+            .as_ref()
+            .expect("tls_config should be Some");
+        assert_eq!(
+            tls_cfg.ca_cert_path.as_ref().map(|p| p.to_str()),
+            Some(Some("/path/to/ca.pem"))
+        );
+        assert_eq!(
+            tls_cfg.client_cert_path.as_ref().map(|p| p.to_str()),
+            Some(Some("/path/to/client.pem"))
+        );
+        assert_eq!(
+            tls_cfg.client_key_path.as_ref().map(|p| p.to_str()),
+            Some(Some("/path/to/client.key"))
+        );
     }
 }

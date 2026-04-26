@@ -233,37 +233,46 @@ impl Authorizer {
         let mut roles = HashMap::new();
 
         // Admin role - full access
-        roles.insert("admin".to_string(), Role {
-            name: "admin".to_string(),
-            description: "Administrator with full access".to_string(),
-            permissions: vec![PermissionRule {
-                resource: "*".to_string(),
-                actions: vec!["admin".to_string()],
-            }],
-            inherits: Vec::new(),
-        });
+        roles.insert(
+            "admin".to_string(),
+            Role {
+                name: "admin".to_string(),
+                description: "Administrator with full access".to_string(),
+                permissions: vec![PermissionRule {
+                    resource: "*".to_string(),
+                    actions: vec!["admin".to_string()],
+                }],
+                inherits: Vec::new(),
+            },
+        );
 
         // User role - read/write to own collections
-        roles.insert("user".to_string(), Role {
-            name: "user".to_string(),
-            description: "Regular user with read/write access".to_string(),
-            permissions: vec![PermissionRule {
-                resource: "collection:*".to_string(),
-                actions: vec!["read".to_string(), "write".to_string()],
-            }],
-            inherits: Vec::new(),
-        });
+        roles.insert(
+            "user".to_string(),
+            Role {
+                name: "user".to_string(),
+                description: "Regular user with read/write access".to_string(),
+                permissions: vec![PermissionRule {
+                    resource: "collection:*".to_string(),
+                    actions: vec!["read".to_string(), "write".to_string()],
+                }],
+                inherits: Vec::new(),
+            },
+        );
 
         // Reader role - read-only access
-        roles.insert("reader".to_string(), Role {
-            name: "reader".to_string(),
-            description: "Read-only user".to_string(),
-            permissions: vec![PermissionRule {
-                resource: "collection:*".to_string(),
-                actions: vec!["read".to_string()],
-            }],
-            inherits: Vec::new(),
-        });
+        roles.insert(
+            "reader".to_string(),
+            Role {
+                name: "reader".to_string(),
+                description: "Read-only user".to_string(),
+                permissions: vec![PermissionRule {
+                    resource: "collection:*".to_string(),
+                    actions: vec!["read".to_string()],
+                }],
+                inherits: Vec::new(),
+            },
+        );
 
         info!("Using default built-in roles");
         roles

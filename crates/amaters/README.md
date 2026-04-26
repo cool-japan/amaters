@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/amaters.svg)](https://crates.io/crates/amaters)
 [![Documentation](https://docs.rs/amaters/badge.svg)](https://docs.rs/amaters)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE-APACHE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://www.rust-lang.org/)
 
 **AmateRS** is a next-generation distributed database with Fully Homomorphic Encryption (FHE) capabilities, enabling computation on encrypted data without ever exposing plaintext to servers.
@@ -55,11 +55,13 @@ Add AmateRS to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-amaters = "0.1"
+amaters = "0.2"
 
 # Or with specific features
-amaters = { version = "0.1", features = ["full"] }
+amaters = { version = "0.2", features = ["full"] }
 ```
+
+> **Status**: Alpha — API is stabilising. Not yet recommended for production use.
 
 ### Basic Usage
 
@@ -157,30 +159,30 @@ If you need only specific functionality, you can use the individual crates direc
 ```toml
 [dependencies]
 # Core types and storage
-amaters-core = "0.1"
+amaters-core = "0.2"
 
 # Network layer
-amaters-net = "0.1"
+amaters-net = "0.2"
 
 # Consensus
-amaters-cluster = "0.1"
+amaters-cluster = "0.2"
 
 # Client SDK
-amaters-sdk-rust = "0.1"
+amaters-sdk-rust = "0.2"
 ```
 
 ## Development Status
 
-**Current Version**: 0.1.0 (Production Ready)
+**Current Version**: 0.2.0 (Alpha)
 
-- ✅ Core storage engine (Iwato) - LSM-Tree with WAL and compaction
-- ✅ FHE compute engine (Yata) - TFHE-rs integration with predicate evaluation
-- ✅ Network layer (Musubi) - gRPC with TLS/mTLS
-- ✅ Rust SDK with connection pooling and retry logic
-- ✅ CLI tool with full admin capabilities
-- ✅ 665+ tests passing
-- 🚧 Consensus layer (Ukehi) - Foundation complete, clustering in progress
-- 📋 GPU acceleration (CUDA/Metal) - Planned for v0.2.0
+- Core storage engine (Iwato) - LSM-Tree with WAL and compaction
+- FHE compute engine (Yata) - TFHE-rs integration with predicate evaluation
+- Network layer (Musubi) - gRPC with TLS/mTLS
+- Rust SDK - connection management, caching, pagination, sorting, batch operations, range queries (112 tests, 164 pub items)
+- TypeScript/WASM SDK - dual transport (gRPC + HTTP/1.1), batch operations, retry logic (84 tests, 189 pub items)
+- Python SDK - async PyO3 bindings, connection, query, batch operations
+- Facade crate (this crate) - re-exports from all component crates (34 tests)
+- CLI tool with admin capabilities
 
 ## Contributing
 
@@ -215,12 +217,7 @@ cargo fmt --all
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+Licensed under Apache-2.0.
 
 ## Authors
 

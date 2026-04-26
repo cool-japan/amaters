@@ -1,6 +1,7 @@
 [package]
 name = "amaters-cli"
 description = "Command-line interface for AmateRS"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +15,7 @@ categories = ["command-line-utilities", "database"]
 amaters-core = { workspace = true }
 amaters-sdk-rust = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

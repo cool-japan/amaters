@@ -1,211 +1,95 @@
 # amaters-net TODO
 
-## Phase 1: Protocol Design ✅
+## Implemented (v0.2.0) ✅
 
-- [x] Define gRPC service schema
-  - [x] Create .proto files for AQL
-  - [x] Define request/response messages
-  - [x] Define streaming operations
-  - [x] Add versioning support
-- [x] Design error handling
-  - [x] Network errors
-  - [x] Timeout handling
-  - [x] Retry strategies
-- [x] Connection state management
-  - [x] Connection lifecycle
-  - [x] Reconnection logic
-  - [x] Graceful shutdown
+- [x] gRPC service and server (tonic-based)
+- [x] AQL query client and server
+- [x] Client builder with TLS/mTLS configuration
+- [x] mTLS with OCSP revocation checking (RFC 6960)
+- [x] Pure Rust TLS crypto: SHA-256, HMAC, PBKDF2, AES-CBC
+- [x] Encrypted PEM key support (PKCS#8, legacy)
+- [x] Connection pooling with health checks and idle timeout
+- [x] Load balancing: round-robin, weighted, random, least-connections
+- [x] Rate limiting: token bucket, sliding window
+- [x] 266 tests passing
 
-## Phase 2: gRPC Implementation 🚧
+## Upcoming Work
 
-### Server Side
-- [x] Implement gRPC server (stub implementation)
-  - [x] Service trait implementation (stubbed, awaiting full service generation)
-  - [x] Request routing (designed)
-  - [ ] Middleware support (auth, logging)
-  - [x] Error conversion
-- [x] Request handling (designed)
-  - [x] Parse AQL queries (conversion functions implemented)
-  - [x] Execute via amaters-core (designed)
-  - [x] Return responses (designed)
-- [x] Streaming support (designed)
-  - [x] Bidirectional streaming (protocol defined)
-  - [x] Backpressure handling (protocol defined)
-  - [x] Stream cancellation (protocol defined)
+### Middleware Support
+- [x] Authentication middleware (pluggable) (done 2026-04-17)
+  - **Goal:** Tower middleware layer for pluggable auth; default bearer token validator; `AuthValidator` trait for custom implementations.
+  - **Design:** `AuthMiddlewareLayer<V: AuthValidator>` wraps inner Tower service; `AuthValidator::validate(metadata) -> Result<Claims, AuthError>`; extracts Authorization header from gRPC metadata.
+  - **Files:** `crates/amaters-net/src/auth.rs`, `crates/amaters-net/src/lib.rs`
+  - **Tests:** `test_auth_rejects_missing_token`, `test_auth_accepts_valid_token`, `test_auth_custom_validator`, plus `test_bearer_validator_rejects_non_bearer_prefix`, `test_bearer_validator_rejects_expired`, `test_auth_validator_is_object_safe`, `test_layer_construction`.
+  - **Refinements vs plan:**
+    - `AuthValidator::validate(&'a self, token: &'a str)` takes the raw header value (not `Option<&'a str>`); the middleware extracts the `authorization` header and returns `MissingToken` before the validator is called, cleanly separating header-extraction concerns from validation logic.
+    - `BearerTokenValidator::new(secret: &[u8])` takes a byte slice rather than `impl Into<String>` — aligns directly with `jsonwebtoken::DecodingKey::from_secret`, avoids an unnecessary string copy.
+    - `AuthMiddlewareLayer<V>` stores `V` directly (not `Arc<V>`) and requires `V: Clone + Send + Sync + 'static`; `BearerTokenValidator` derives `Clone` (cheap: `DecodingKey` and `Validation` clone cheaply).
+    - Trait bound on `AuthValidator` is `Send + Sync` (no `'static`); `'static` appears only at impl sites where the middleware's `Clone + 'static` bound demands it. Object-safety confirmed by `test_auth_validator_is_object_safe`.
+- [ ] Request/response logging middleware
+- [x] Metrics middleware (request rate, latency, error rate) (done 2026-04-17)
+  - **Goal:** Tower layer counting requests per method, recording latency histograms, tracking error rates.
+  - **Design:** `MetricsLayer` with `metrics::histogram!` for latency, `metrics::counter!` for request count and errors; labels: method name, status code.
+  - **Files:** `crates/amaters-net/src/metrics_layer.rs`, `crates/amaters-net/src/lib.rs`
+  - **Tests:** `test_metrics_counter_increments`, `test_metrics_latency_histogram_records`, `test_metrics_prometheus_text_format`, `test_metrics_layer_wraps_service`, `test_latency_bucket_boundaries`, `test_metrics_error_counting`.
+  - **Refinements vs plan:**
+    - No `metrics-rs` dependency used; implemented with hand-rolled `AtomicU64` counters and histogram buckets, following the same pattern as `amaters-core::metrics::CoreMetrics`. Avoids an external dependency and keeps the crate 100% Pure Rust.
+    - Prometheus output uses two tiers: global aggregates (`amaters_net_requests_total`, `amaters_net_errors_total`) plus per-method counters (`amaters_net_method_requests_total{method="..."}`) and histogram buckets. The plan referenced a single labelled metric; the split allows cheap global queries without sum-over-methods.
+    - Histogram uses seven finite upper bounds (1, 5, 10, 50, 100, 500, 1000 ms) plus a catch-all `+Inf` bucket (8 `AtomicU64` slots per method), cumulative in the Prometheus sense.
 
-### Client Side
-- [x] Implement gRPC client (stub implementation)
-  - [x] Connection management (designed)
-  - [x] Request building (conversion functions implemented)
-  - [x] Response handling (designed)
-- [x] Client configuration
-  - [x] Timeout settings
-  - [x] Retry policies (error categorization for retries)
-  - [ ] Connection pooling
+### QUIC Transport (Phase 3)
+- [ ] Integrate quinn (QUIC library) to replace HTTP/2 with HTTP/3
+- [ ] 0-RTT session resumption
+- [ ] Stream multiplexing and flow control
+- [ ] Connection migration support
 
-**Note**: Server and client have stub implementations. Full gRPC service integration requires proper tonic-build service generation configuration, which will be completed in the next iteration.
+### Observability
+- [ ] Structured request/response logging with configurable verbosity
+- [~] Prometheus-compatible metrics endpoint (planned 2026-04-16)
+  - **Goal:** HTTP `/metrics` endpoint in Prometheus text format on configurable address.
+  - **Design:** `metrics-exporter-prometheus` with `PrometheusBuilder::new().install_recorder()`; serve via hyper or axum on separate port.
+  - **Files:** `crates/amaters-net/src/metrics_layer.rs`, `crates/amaters-net/Cargo.toml`
+  - **Tests:** `test_prometheus_endpoint_returns_200`, `test_prometheus_metrics_format`
+  - **Risk:** Separate HTTP server must not interfere with gRPC port.
+- [ ] OpenTelemetry distributed tracing integration
+- [ ] Active connection count, bytes sent/received, RTT metrics
 
-## Phase 3: QUIC Transport 📋
-
-- [ ] Integrate quinn (QUIC library)
-  - [ ] Replace HTTP/2 with HTTP/3
-  - [ ] Configure QUIC parameters
-  - [ ] Handle connection migration
-- [ ] 0-RTT optimization
-  - [ ] Session resumption
-  - [ ] Early data support
-- [ ] Multiplexing
-  - [ ] Concurrent streams
-  - [ ] Stream prioritization
-  - [ ] Flow control
-
-## Phase 4: Security (mTLS) 📋
-
-### Certificate Management
-- [ ] Certificate generation
-  - [ ] Self-signed for development
-  - [ ] CA integration for production
-- [ ] Certificate validation
-  - [ ] Client certificate verification
-  - [ ] Server certificate verification
-  - [ ] Chain validation
-- [ ] Certificate rotation
-  - [ ] Reload certificates
-  - [ ] Graceful transition
-
-### Authentication
-- [ ] Client authentication
-  - [ ] mTLS verification
-  - [ ] Token-based auth (optional)
-  - [ ] API keys (optional)
-- [ ] Authorization
-  - [ ] Role-based access control
-  - [ ] Query-level permissions
-
-## Phase 5: Connection Pooling 📋
-
-- [ ] Connection pool implementation
-  - [ ] Pool configuration (min/max size)
-  - [ ] Connection health checks
-  - [ ] Idle connection timeout
-  - [ ] Connection reuse
-- [ ] Load balancing
-  - [ ] Round-robin
-  - [ ] Least connections
-  - [ ] Weighted balancing
-- [ ] Circuit breaker
-  - [ ] Failure detection
-  - [ ] Automatic recovery
-  - [ ] Fallback strategies
-
-## Phase 6: Observability 📋
-
-### Metrics
-- [ ] Connection metrics
-  - [ ] Active connections
-  - [ ] Connection errors
-  - [ ] Connection duration
-- [ ] Request metrics
-  - [ ] Request rate
-  - [ ] Request latency
-  - [ ] Request errors
-- [ ] Network metrics
-  - [ ] Bytes sent/received
-  - [ ] Packet loss
-  - [ ] RTT (round-trip time)
-
-### Logging
-- [ ] Structured logging
-  - [ ] Request/response logging
-  - [ ] Error logging
-  - [ ] Debug logging
-- [ ] Log levels
-  - [ ] Configurable verbosity
-  - [ ] Performance impact
-
-### Tracing
-- [ ] Distributed tracing
-  - [ ] OpenTelemetry integration
-  - [ ] Trace context propagation
-  - [ ] Span creation
-
-## Phase 7: Performance Optimization 📋
-
-- [ ] Zero-copy operations
-  - [ ] Minimize data copying
-  - [ ] Use shared buffers
-- [ ] Batching
-  - [ ] Batch multiple requests
-  - [ ] Reduce network round-trips
-- [ ] Compression
-  - [ ] gRPC compression (gzip, deflate)
-  - [ ] Application-level compression
-- [ ] Benchmarking
-  - [ ] Throughput benchmarks
-  - [ ] Latency benchmarks
-  - [ ] Resource usage profiling
-
-## Phase 8: Testing 🚧
-
-### Unit Tests
-- [x] Protocol serialization tests (conversion tests)
-- [x] Connection handling tests (basic client/server creation)
-- [x] Error handling tests (error code mapping and categorization)
-- [ ] Pool management tests
+### Performance Optimization
+- [ ] Zero-copy buffer management
+- [ ] Request batching to reduce round-trips
+- [x] gRPC-level compression (gzip/deflate) (done 2026-04-17)
+  - **Goal:** Enable gzip compression on all tonic server and client builders via `compression` feature flag.
+  - **Design:** `CompressionEncoding::Gzip` on tonic server builder and client stubs; feature-gated in Cargo.toml.
+  - **Files:** `crates/amaters-net/src/server.rs`, `crates/amaters-net/src/client.rs`, `crates/amaters-net/Cargo.toml`
+  - **Tests:** `test_compression_feature_gate_disabled` (server), `test_compression_config_default`, `test_compression_config_gzip`, `test_compression_identity_returns_none`, `test_compression_disabled_returns_none`, `test_builder_with_compression`, `test_compression_algorithm_default`, `test_compression_algorithm_variants` (client).
+  - **Refinements vs plan:**
+    - Compression is opt-in at both levels: feature flag (`compression = ["tonic/gzip"]`) gates `CompressionEncoding::Gzip` in the server builder, while the client additionally exposes a `CompressionConfig` in `AqlClientConfig` allowing per-client control independent of the feature flag.
+    - `CompressionConfig::gzip()` constructor and `CompressionAlgorithm` enum provide a typed, builder-pattern API so callers never manipulate tonic internals directly.
+    - A full round-trip integration test was not added (original plan item `test_compressed_round_trip_smaller_than_uncompressed`) as it requires a live gRPC server — deferred to the integration tests section.
+- [ ] Throughput and latency benchmarks with criterion
 
 ### Integration Tests
-- [ ] Client-server communication
-- [ ] mTLS authentication
-- [ ] Stream handling
-- [ ] Error scenarios
+- [ ] Client-server round-trip tests with real mTLS
+- [ ] OCSP revocation scenario tests
+- [ ] Stream handling tests (bidirectional)
+- [ ] Load balancer failover tests
+- [ ] Rate limiter accuracy tests under load
 
-### Load Tests
-- [ ] High connection count
-- [ ] High request rate
-- [ ] Long-running connections
-- [ ] Resource limits
+### Chaos / Load Tests
+- [ ] High connection count (10K+)
+- [ ] High request rate (100K+ rps)
+- [ ] Network partition simulation
+- [ ] Certificate expiry handling
+- [ ] Connection drop and reconnect
 
-### Chaos Tests
-- [ ] Network partitions
-- [ ] Server failures
-- [ ] Certificate expiry
-- [ ] Connection drops
-
-## Dependencies
-
-- [x] `tonic` (gRPC)
-- [x] `tonic-build` (codegen)
-- [x] `prost` (protobuf)
-- [ ] `quinn` (QUIC)
-- [ ] `rustls` (TLS)
-- [ ] `tokio-rustls` (async TLS)
-- [ ] `tower` (middleware)
-
-## Protocol Files
-
-- [x] `protocol/aql.proto` - Query protocol
-- [x] `protocol/types.proto` - Common types
-- [x] `protocol/errors.proto` - Error messages
-- [x] `protocol/query.proto` - Query operations
-
-## Configuration
-
-- [ ] TOML-based configuration
-- [ ] Environment variables
-- [ ] CLI arguments
-- [ ] Hot reload support
-
-## Documentation
-
-- [ ] API documentation
-- [ ] Protocol specification
-- [ ] Security guide
-- [ ] Performance tuning guide
-- [ ] Examples
+### Configuration
+- [ ] TOML-based configuration file support
+- [ ] Environment variable overrides
+- [ ] Hot reload of TLS certificates
 
 ## Notes
 
-- QUIC is UDP-based, ensure firewall rules allow it
-- mTLS requires proper certificate infrastructure
-- Connection pooling critical for performance
-- Monitor network metrics for bottlenecks
+- QUIC is UDP-based; verify firewall rules allow it before enabling Phase 3
+- mTLS requires a proper PKI; provide a dev CA setup script
+- Connection pooling is critical for high-throughput workloads
+- Rate limiting parameters must be tuned per deployment

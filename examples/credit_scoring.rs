@@ -1,28 +1,23 @@
 //! Financial Inclusion - Credit Scoring Use Case
 //!
-//! Privacy-preserving credit evaluation.
+//! **NOTE**: The full implementation of this example lives at:
+//!   `crates/amaters-core/examples/credit_scoring.rs`
+//!
+//! Run it with:
+//! ```bash
+//! cargo run -p amaters-core --example credit_scoring
+//! ```
+//!
+//! This file is kept for reference but is not compiled as part of any crate.
+//!
+//! The full example demonstrates:
+//! - In-memory storage of encrypted credit data
+//! - Range queries and batch retrieval
+//! - FHE circuit construction (income stability, spending analysis, loan risk)
+//! - Circuit execution via FheExecutor
+//! - Privacy-preserving credit score computation
 
-use amaters_core::{storage::MemoryStorage, traits::StorageEngine, types::{CipherBlob, Key}};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    println!("Privacy-Preserving Credit Scoring Example");
-    println!("==========================================\n");
-
-    let storage = MemoryStorage::new();
-
-    // User stores encrypted financial history
-    println!("Storing encrypted user financial data...");
-    let user_key = Key::from_str("user:123:financial_history");
-    let encrypted_history = CipherBlob::new(vec![/* Encrypted transaction history */]);
-    storage.put(&user_key, &encrypted_history).await?;
-
-    println!("✓ Financial data encrypted - privacy preserved!");
-    println!("\nTODO: Compute credit score on encrypted data");
-    println!("- Income stability analysis");
-    println!("- Spending pattern evaluation");
-    println!("- Loan risk assessment");
-    println!("\nResult: Approve/Deny + Interest Rate (computed on encrypted data)");
-
-    Ok(())
+fn main() {
+    eprintln!("This stub is not meant to be run directly.");
+    eprintln!("Please run:  cargo run -p amaters-core --example credit_scoring");
 }

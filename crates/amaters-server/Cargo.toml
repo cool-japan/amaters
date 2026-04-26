@@ -1,6 +1,7 @@
 [package]
 name = "amaters-server"
 description = "AmateRS server binary"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,11 +14,12 @@ categories = ["database-implementations"]
 [dependencies]
 amaters-core = { workspace = true }
 amaters-net = { workspace = true }
-amaters-cluster = { workspace = true }
+amaters-cluster = { workspace = true, optional = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -27,20 +29,23 @@ thiserror = { workspace = true }
 rustls = { workspace = true }
 async-trait = { workspace = true }
 # Authentication and authorization
-jsonwebtoken = { version = "10.2", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.3", features = ["rust_crypto"] }
 x509-parser = "0.18"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 chrono = { workspace = true }
 uuid = { workspace = true }
+parking_lot = { workspace = true }
+blake3 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 amaters-sdk-rust = { workspace = true }
 
 [features]
-default = ["compute"]
+default = ["compute", "cluster"]
 compute = ["amaters-core/compute", "amaters-net/compute"]
+cluster = ["dep:amaters-cluster"]
 
 [lib]
 name = "amaters_server"

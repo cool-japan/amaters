@@ -174,7 +174,7 @@ impl KeyManager {
         }
 
         // Sort by creation time (newest first)
-        keys.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        keys.sort_by_key(|k| std::cmp::Reverse(k.created_at));
 
         Ok(keys)
     }

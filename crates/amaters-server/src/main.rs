@@ -210,6 +210,7 @@ async fn handle_version(verbose: bool) -> Result<(), Box<dyn std::error::Error>>
         println!("\nComponent Versions:");
         println!("  amaters-core: {}", amaters_core::VERSION);
         println!("  amaters-net: {}", amaters_net::VERSION);
+        #[cfg(feature = "cluster")]
         println!("  amaters-cluster: {}", amaters_cluster::VERSION);
         println!("\nBuild Information:");
         println!("  Rust version: {}", env!("CARGO_PKG_RUST_VERSION"));

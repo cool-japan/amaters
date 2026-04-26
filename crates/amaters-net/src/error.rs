@@ -63,6 +63,10 @@ pub enum NetError {
     #[error("Invalid certificate: {0}")]
     InvalidCertificate(String),
 
+    /// TLS configuration error
+    #[error("TLS error: {0}")]
+    TlsError(String),
+
     /// Storage error from amaters-core
     #[error("Storage error: {0}")]
     Storage(#[from] amaters_core::error::AmateRSError),
@@ -74,6 +78,10 @@ pub enum NetError {
     /// Server unavailable
     #[error("Server unavailable: {0}")]
     ServerUnavailable(String),
+
+    /// Rate limit exceeded
+    #[error("Rate limit exceeded: {0}")]
+    RateLimitExceeded(#[from] crate::rate_limiter::RateLimitError),
 
     /// Server overloaded
     #[error("Server overloaded: {0}")]
@@ -112,7 +120,10 @@ impl NetError {
             NetError::AuthFailed(_) => ErrorCode::ErrorAuthFailed,
             NetError::AuthExpired(_) => ErrorCode::ErrorAuthExpired,
             NetError::InsufficientPermissions(_) => ErrorCode::ErrorAuthInsufficientPermissions,
-            NetError::InvalidCertificate(_) => ErrorCode::ErrorAuthInvalidCertificate,
+            NetError::InvalidCertificate(_) | NetError::TlsError(_) => {
+                ErrorCode::ErrorAuthInvalidCertificate
+            }
+            NetError::RateLimitExceeded(_) => ErrorCode::ErrorServerOverloaded,
             NetError::Storage(_) => ErrorCode::ErrorStorageIo,
             NetError::ServerInternal(_) => ErrorCode::ErrorServerInternal,
             NetError::ServerUnavailable(_) => ErrorCode::ErrorServerUnavailable,
@@ -131,6 +142,7 @@ impl NetError {
             | NetError::ConnectionReset(_)
             | NetError::ServerUnavailable(_)
             | NetError::ServerOverloaded(_) => ErrorCategory::CategoryRetryable,
+            NetError::RateLimitExceeded(_) => ErrorCategory::CategoryRetryable,
             NetError::AuthFailed(_) | NetError::AuthExpired(_) => ErrorCategory::CategoryAuth,
             NetError::InvalidRequest(_)
             | NetError::MalformedMessage(_)
@@ -160,9 +172,12 @@ impl From<NetError> for Status {
             | NetError::MalformedMessage(_)
             | NetError::MissingField(_) => Code::InvalidArgument,
             NetError::UnsupportedVersion(_) => Code::Unimplemented,
-            NetError::AuthFailed(_) | NetError::InvalidCertificate(_) => Code::Unauthenticated,
+            NetError::AuthFailed(_) | NetError::InvalidCertificate(_) | NetError::TlsError(_) => {
+                Code::Unauthenticated
+            }
             NetError::AuthExpired(_) => Code::Unauthenticated,
             NetError::InsufficientPermissions(_) => Code::PermissionDenied,
+            NetError::RateLimitExceeded(_) => Code::ResourceExhausted,
             NetError::Storage(_) => Code::Internal,
             NetError::ServerInternal(_) => Code::Internal,
             NetError::ServerUnavailable(_) | NetError::ServerOverloaded(_) => Code::Unavailable,

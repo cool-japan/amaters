@@ -32,8 +32,7 @@ fn get_port_base() -> u32 {
         .map(|d| d.as_nanos() as u32)
         .unwrap_or(0);
     // Generate port in range 19000-45000 to avoid common ports
-    let base = 19000 + ((pid ^ time_seed) % 26000);
-    base
+    19000 + ((pid ^ time_seed) % 26000)
 }
 
 /// Test context holding server, storage, and cleanup state
