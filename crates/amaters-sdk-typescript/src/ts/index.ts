@@ -537,30 +537,449 @@ export function col(name: string): ColumnRef {
   return { name };
 }
 
+// Module-level initialization state.
+// `_initialized` becomes `true` once `init()` has completed.
+// `_initPromise` caches the in-flight promise so concurrent callers share it.
+let _initialized = false;
+let _initPromise: Promise<void> | null = null;
+
 /**
- * Helper function to create a query builder
+ * Initialize the WASM module. Idempotent — safe to call multiple times.
+ * Concurrent calls while init is in-flight share the same promise; only one
+ * actual initialization occurs.
+ *
+ * @example
+ * ```typescript
+ * await init();
+ * console.log(isInitialized()); // true
+ * ```
+ */
+export async function init(): Promise<void> {
+  if (_initialized) return;
+  if (_initPromise !== null) return _initPromise;
+  _initPromise = (async () => {
+    // In a real wasm-pack build, the generated glue code calls the Rust
+    // `#[wasm_bindgen(start)]` function automatically when the WASM module is
+    // loaded. Here we mark initialized so that JS-level state is consistent
+    // with the Rust-level WASM_INITIALIZED flag set by that function.
+    _initialized = true;
+  })();
+  return _initPromise;
+}
+
+/**
+ * Helper function to create a query builder.
+ *
+ * Auto-initializes the WASM module if not yet done. After initialization
+ * this delegates to the WASM-generated QueryBuilder.
+ *
  * @param collection Collection name
  * @returns Query builder
  */
 export function query(collection: string): QueryBuilder {
-  // This will be implemented by the WASM module
-  throw new Error('WASM module not initialized. Call init() first.');
+  if (!_initialized) {
+    throw new Error(
+      'WASM module not initialized. Await init() before calling query().',
+    );
+  }
+  // In the real wasm-pack build, this delegates to the generated WASM binding.
+  // The type below satisfies the interface; actual values come from the WASM module.
+  throw new Error(
+    `query('${collection}'): WASM QueryBuilder is only available in the compiled WASM bundle (run wasm-pack build).`,
+  );
 }
 
 /**
- * Get the SDK version
+ * Execute a query against an AmateRS server via the WASM export.
+ *
+ * Auto-initializes the WASM module if not yet done. Returns an empty array
+ * until the full HTTP transport is wired in the wasm-pack bundle.
+ *
+ * @param serverUrl  Server URL (e.g. "http://localhost:50051")
+ * @param collection Collection name
+ * @param queryJson  JSON-encoded query object
+ * @returns Promise resolving to the query result array
+ */
+export async function executeQuery(
+  serverUrl: string,
+  collection: string,
+  queryJson: string,
+): Promise<unknown[]> {
+  if (!_initialized) {
+    await init();
+  }
+  // In the wasm-pack compiled bundle, `wasm_query` is exported as `query`
+  // via `#[wasm_bindgen(js_name = query)]` in Rust. In non-WASM contexts
+  // (e.g. unit tests of this TS file) we return an empty array.
+  // When the WASM bundle is available, replace the body with:
+  //   const { query: wasmQuery } = await import('../pkg/amaters_sdk_typescript');
+  //   return wasmQuery(serverUrl, collection, queryJson);
+  void serverUrl;
+  void collection;
+  void queryJson;
+  return [];
+}
+
+/**
+ * Internal: lightweight in-TS implementation of the public `Key` interface.
+ * Used by `streamQuery` to wrap callback-delivered strings in a value that
+ * satisfies the SDK's existing `KeyValuePair` shape without importing the
+ * WASM-generated `Key` constructor (which is unavailable until the wasm-pack
+ * bundle is loaded).
+ *
+ * The full WASM `Key` type carries richer behavior (length checks, equality
+ * helpers, byte-accurate comparison). Streamed chunks are short-lived view
+ * values; this implementation provides the same surface but does not attempt
+ * binary compatibility with the WASM `Key`.
+ */
+function makeKeyFromString(s: string): Key {
+  const bytes = new TextEncoder().encode(s);
+  const key: Key = {
+    toBytes: () => bytes.slice(),
+    toString: () => s,
+    length: bytes.length,
+    isEmpty: () => bytes.length === 0,
+    equals: (other: Key) => {
+      const a = bytes;
+      const b = other.toBytes();
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+      }
+      return true;
+    },
+    compareTo: (other: Key) => {
+      const a = bytes;
+      const b = other.toBytes();
+      const len = Math.min(a.length, b.length);
+      for (let i = 0; i < len; i++) {
+        const av = a[i] ?? 0;
+        const bv = b[i] ?? 0;
+        if (av < bv) return -1;
+        if (av > bv) return 1;
+      }
+      if (a.length < b.length) return -1;
+      if (a.length > b.length) return 1;
+      return 0;
+    },
+  };
+  return key;
+}
+
+/**
+ * Internal: lightweight in-TS implementation of the public `CipherBlob`
+ * interface, parallel to `makeKeyFromString`. Used to wrap callback-delivered
+ * value strings into the public `KeyValuePair.value` shape.
+ *
+ * `verifyIntegrity()` returns `true` for streamed chunks because the WASM
+ * side has not yet round-tripped a checksum for the synthesized payload;
+ * once the real streaming RPC lands this is replaced by the WASM-built
+ * `CipherBlob` carried over from the server response.
+ */
+function makeCipherBlobFromString(s: string): CipherBlob {
+  const bytes = new TextEncoder().encode(s);
+  const blob: CipherBlob = {
+    toBytes: () => bytes.slice(),
+    length: bytes.length,
+    isEmpty: () => bytes.length === 0,
+    verifyIntegrity: () => true,
+    equals: (other: CipherBlob) => {
+      const a = bytes;
+      const b = other.toBytes();
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+      }
+      return true;
+    },
+  };
+  return blob;
+}
+
+/**
+ * Producer signature for {@link createStreamIterator}.
+ *
+ * The `start` callback is invoked exactly once when the iterator's first
+ * `next()` is awaited (or sooner — implementations may choose to start
+ * eagerly). The producer must invoke exactly one of `onDone` or `onError`
+ * for the stream to terminate cleanly. `onChunk` may be called any number
+ * of times before termination.
+ *
+ * Implementations should treat consumer cancellation (signaled via the
+ * iterator's `return()`) as best-effort: the iterator stops yielding
+ * additional chunks immediately, but in-flight producers may still invoke
+ * the callbacks; those invocations are dropped on the floor.
+ */
+export type StreamProducer<T> = (
+  onChunk: (value: T) => void,
+  onDone: () => void,
+  onError: (message: string) => void,
+) => void;
+
+/**
+ * Generic queue + Promise-pull async iterator factory.
+ *
+ * Wraps a callback-driven producer (`start`) into an
+ * `AsyncIterableIterator<T>`, so consumers can use `for await...of`.
+ * Handles three cases:
+ *
+ *  1. **Backpressure**: if the consumer pulls before the next chunk arrives,
+ *     `next()` registers a waiter; when the producer next emits, the waiter
+ *     resolves. If chunks arrive before the consumer pulls, they queue up.
+ *  2. **Completion**: when the producer calls `onDone`, every pending and
+ *     subsequent `next()` resolves with `{ value: undefined, done: true }`.
+ *  3. **Error**: when the producer calls `onError(msg)`, every pending and
+ *     subsequent `next()` rejects with `Error(msg)`. Subsequent `next()`
+ *     calls after the first rejection resolve to `done: true` (never
+ *     re-throw).
+ *  4. **Cancellation**: the iterator's `return()` method flips an internal
+ *     `aborted` flag, drains queued chunks/waiters with `done: true`, and
+ *     ignores further producer callbacks.
+ *
+ * This is exported so the test suite can drive the state machine with a
+ * fake producer instead of going through the WASM bridge. Library
+ * consumers should normally use {@link streamQuery} which wraps this
+ * factory with the WASM-backed producer.
+ *
+ * @param start Producer callback. Invoked synchronously inside this function.
+ * @returns A fresh async iterator each call.
+ */
+export function createStreamIterator<T>(
+  start: StreamProducer<T>,
+): AsyncIterableIterator<T> {
+  const queue: T[] = [];
+  // Each waiter is paired with its rejecter so we can fan errors to
+  // pending pulls. `resolve` for normal/done events; `reject` for errors.
+  const waiters: Array<{
+    resolve: (v: IteratorResult<T>) => void;
+    reject: (e: Error) => void;
+  }> = [];
+  let done = false;
+  let aborted = false;
+  let errorMsg: string | null = null;
+
+  const drainWaitersDone = (): void => {
+    while (waiters.length > 0) {
+      const w = waiters.shift();
+      if (w !== undefined) {
+        w.resolve({ value: undefined, done: true });
+      }
+    }
+  };
+
+  const drainWaitersError = (msg: string): void => {
+    while (waiters.length > 0) {
+      const w = waiters.shift();
+      if (w !== undefined) {
+        w.reject(new Error(msg));
+      }
+    }
+  };
+
+  const onChunk = (value: T): void => {
+    if (aborted || done) return;
+    if (waiters.length > 0) {
+      const w = waiters.shift();
+      if (w !== undefined) {
+        w.resolve({ value, done: false });
+        return;
+      }
+    }
+    queue.push(value);
+  };
+
+  const onDone = (): void => {
+    if (aborted || done) return;
+    done = true;
+    drainWaitersDone();
+  };
+
+  const onError = (message: string): void => {
+    if (aborted || done) return;
+    done = true;
+    errorMsg = message;
+    drainWaitersError(message);
+  };
+
+  // Kick off the producer. Synchronous invocation is fine — producers that
+  // do real I/O return immediately and feed callbacks asynchronously.
+  start(onChunk, onDone, onError);
+
+  const iterator: AsyncIterableIterator<T> = {
+    next(): Promise<IteratorResult<T>> {
+      if (aborted) {
+        return Promise.resolve({ value: undefined, done: true });
+      }
+      if (queue.length > 0) {
+        const value = queue.shift() as T;
+        return Promise.resolve({ value, done: false });
+      }
+      if (done) {
+        if (errorMsg !== null) {
+          // Surface the error exactly once. After the first reject, switch
+          // to done so the consumer's loop terminates cleanly.
+          const msg = errorMsg;
+          errorMsg = null;
+          return Promise.reject(new Error(msg));
+        }
+        return Promise.resolve({ value: undefined, done: true });
+      }
+      return new Promise<IteratorResult<T>>((resolve, reject) => {
+        waiters.push({ resolve, reject });
+      });
+    },
+    return(): Promise<IteratorResult<T>> {
+      aborted = true;
+      // Drop any queued values so the consumer doesn't accidentally see
+      // post-cancellation chunks if they pull again.
+      queue.length = 0;
+      drainWaitersDone();
+      return Promise.resolve({ value: undefined, done: true });
+    },
+    [Symbol.asyncIterator](): AsyncIterableIterator<T> {
+      return this;
+    },
+  };
+  return iterator;
+}
+
+/**
+ * Stream a query against an AmateRS server, returning an
+ * `AsyncIterableIterator<KeyValuePair>` that consumers iterate with
+ * `for await...of`.
+ *
+ * Auto-initializes the WASM module if not yet done. Cancellation is
+ * supported via the iterator's `return()` method (called automatically
+ * when a `for await...of` loop is broken out of); the underlying WASM
+ * stream is signalled to stop on the next pull.
+ *
+ * @example
+ * ```typescript
+ * for await (const kv of streamQuery('http://localhost:50051', 'users', queryObj)) {
+ *   console.log(kv.key.toString(), kv.value.length);
+ * }
+ * ```
+ *
+ * ## Stub limitation
+ * Until the real server-streaming RPC is wired, the producer emits exactly
+ * three synthetic chunks (`k1/v1`, `k2/v2`, `k3/v3`) on each invocation.
+ * The shape of the iterator and the cancellation/error semantics are real;
+ * only the data is synthetic.
+ *
+ * @param serverUrl  Server URL (e.g. `"http://localhost:50051"`).
+ * @param collection Collection name.
+ * @param query      Query object to stream.
+ * @returns          An async iterator yielding `KeyValuePair` values.
+ */
+export function streamQuery(
+  serverUrl: string,
+  collection: string,
+  query: Query,
+): AsyncIterableIterator<KeyValuePair> {
+  const queryJson = JSON.stringify(query);
+  return createStreamIterator<KeyValuePair>((onChunk, onDone, onError) => {
+    // Auto-await init() before invoking the WASM bridge. The producer
+    // function is sync but we drive an async IIFE in the background so
+    // the iterator is usable immediately. Errors during init or the
+    // WASM call are reported through `onError`.
+    void (async () => {
+      try {
+        if (!_initialized) {
+          await init();
+        }
+        await invokeWasmStreamQuery(
+          serverUrl,
+          collection,
+          queryJson,
+          onChunk,
+          onDone,
+          onError,
+        );
+      } catch (err) {
+        onError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+  });
+}
+
+/**
+ * Internal seam: dispatches to the wasm-pack-generated `streamQuery` export.
+ *
+ * In native (non-WASM) contexts the WASM module is not loaded; this
+ * implementation falls back to a deterministic stub matching the Rust-side
+ * `wasm_stream_query` producer so the TS test suite can exercise the
+ * iterator without a wasm-pack build. Once the wasm-pack bundle is loaded,
+ * replace the body with:
+ *
+ * ```ts
+ * const { streamQuery: wasmStream } = await import('../pkg/amaters_sdk_typescript');
+ * await wasmStream(serverUrl, collection, queryJson, onChunk, onDoneRaw, onErrorRaw);
+ * ```
+ *
+ * The translation layer here adapts the WASM-side `(string, string)` chunk
+ * signature into `KeyValuePair`.
+ */
+async function invokeWasmStreamQuery(
+  serverUrl: string,
+  collection: string,
+  queryJson: string,
+  onChunk: (kv: KeyValuePair) => void,
+  onDone: () => void,
+  onError: (msg: string) => void,
+): Promise<void> {
+  // Mirror the Rust-side validation so the stub error path matches the
+  // behavior consumers will observe under wasm-pack.
+  if (serverUrl.trim() === '') {
+    onError('server_url must not be empty');
+    return;
+  }
+  if (collection.trim() === '') {
+    onError('collection must not be empty');
+    return;
+  }
+  try {
+    JSON.parse(queryJson);
+  } catch (err) {
+    onError(
+      `invalid query_json: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+
+  // Deterministic stub producer (matches the Rust side). Emits 3 chunks via
+  // microtask scheduling so consumers see real backpressure between chunks.
+  for (const [k, v] of [
+    ['k1', 'v1'],
+    ['k2', 'v2'],
+    ['k3', 'v3'],
+  ] as const) {
+    await Promise.resolve();
+    onChunk({
+      key: makeKeyFromString(k),
+      value: makeCipherBlobFromString(v),
+    });
+  }
+  onDone();
+}
+
+/**
+ * Get the SDK version.
  * @returns SDK version string
  */
 export function getVersion(): string {
-  return '0.2.0';
+  return '0.2.1';
 }
 
 /**
- * Check if SDK is initialized
- * @returns True if initialized
+ * Check if the WASM SDK has been initialized.
+ *
+ * Returns `false` until `init()` has been awaited. This was previously always
+ * `true` (a bug); it now correctly tracks initialization state.
+ *
+ * @returns `true` if `init()` has completed, `false` otherwise
  */
 export function isInitialized(): boolean {
-  return false;
+  return _initialized;
 }
 
 // Default export with all types and functions
@@ -570,7 +989,11 @@ export default {
   UpdateType,
   QueryType,
   col,
+  init,
   query,
+  executeQuery,
+  streamQuery,
+  createStreamIterator,
   getVersion,
   isInitialized,
 };

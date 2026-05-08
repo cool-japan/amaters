@@ -37,6 +37,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
 blake3 = { workspace = true }
+arc-swap = { workspace = true }
+notify = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

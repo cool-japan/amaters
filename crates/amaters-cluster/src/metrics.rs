@@ -2,10 +2,16 @@
 //!
 //! Provides atomic counters, gauges, and a simple histogram for append-entries
 //! latency, all serialisable into OpenMetrics text format.
+//!
+//! A process-global singleton is available via [`global()`].  The HTTP
+//! scrape endpoint is provided by [`serve_metrics`].
 
 use parking_lot::RwLock;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::task::JoinHandle;
 
 /// Histogram bucket upper bounds in microseconds.
 const LATENCY_BUCKETS_US: &[u64] = &[
@@ -344,6 +350,69 @@ impl ClusterMetrics {
 }
 
 // ---------------------------------------------------------------------------
+// Process-global singleton
+// ---------------------------------------------------------------------------
+
+/// Process-global [`ClusterMetrics`] instance.
+///
+/// Initialised on first access.  Prefer using an owned `Arc<ClusterMetrics>`
+/// when possible (e.g. passed into [`crate::node::RaftNode`]) so that tests
+/// remain isolated.  The global is intended for integrations that cannot
+/// easily thread a reference through (e.g. signal handlers).
+static GLOBAL_CLUSTER_METRICS: OnceLock<Arc<ClusterMetrics>> = OnceLock::new();
+
+/// Return the process-global [`ClusterMetrics`] reference.
+///
+/// The singleton is created on the first call and reused thereafter.
+pub fn global() -> &'static Arc<ClusterMetrics> {
+    GLOBAL_CLUSTER_METRICS.get_or_init(ClusterMetrics::new)
+}
+
+// ---------------------------------------------------------------------------
+// HTTP metrics server
+// ---------------------------------------------------------------------------
+
+/// Spawn a background task that serves the Prometheus `/metrics` endpoint on
+/// `addr`.
+///
+/// The returned [`JoinHandle`] can be awaited or dropped; dropping it aborts
+/// the background task.  The function itself does **not** block — it returns
+/// immediately after spawning.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use std::net::SocketAddr;
+/// # #[tokio::main] async fn main() {
+/// let addr: SocketAddr = "0.0.0.0:9091".parse().expect("valid addr");
+/// let handle = amaters_cluster::metrics::serve_metrics(addr).await;
+/// // handle can be dropped; server continues until the process exits.
+/// # }
+/// ```
+pub async fn serve_metrics(addr: SocketAddr) -> JoinHandle<()> {
+    use axum::routing::get;
+
+    async fn handler() -> String {
+        global().to_prometheus()
+    }
+
+    let router = axum::Router::new().route("/metrics", get(handler));
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(%addr, error = %e, "Failed to bind metrics endpoint");
+                return;
+            }
+        };
+        tracing::info!(%addr, "Cluster metrics endpoint listening");
+        if let Err(e) = axum::serve(listener, router).await {
+            tracing::error!(%addr, error = %e, "Cluster metrics server error");
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -520,6 +589,67 @@ mod tests {
         assert_eq!(
             via_new.current_term.load(Ordering::SeqCst),
             via_default.current_term.load(Ordering::SeqCst)
+        );
+    }
+
+    /// When the current term is incremented (simulating a new election), the
+    /// Prometheus output must reflect the updated gauge value.
+    #[test]
+    fn test_metrics_term_increments_on_election() {
+        let m = fresh();
+        assert_eq!(m.current_term.load(Ordering::SeqCst), 0);
+
+        // Simulate an election: term advances from 0 to 1
+        m.set_current_term(1);
+        m.inc_elections_started();
+
+        let text = m.to_prometheus();
+
+        assert!(
+            text.contains("amaters_cluster_current_term 1"),
+            "Prometheus output must show current_term 1 after election"
+        );
+        assert!(
+            text.contains("amaters_cluster_elections_started_total 1"),
+            "Prometheus output must show elections_started_total 1"
+        );
+
+        // Simulate a second election round
+        m.set_current_term(2);
+        m.inc_elections_started();
+
+        let text2 = m.to_prometheus();
+        assert!(
+            text2.contains("amaters_cluster_current_term 2"),
+            "Prometheus output must show current_term 2 after second election"
+        );
+    }
+
+    /// When the commit index advances, the rendered Prometheus gauge must
+    /// reflect the new value immediately (no caching).
+    #[test]
+    fn test_metrics_commit_index_advances() {
+        let m = fresh();
+        assert_eq!(m.commit_index.load(Ordering::SeqCst), 0);
+
+        m.set_commit_index(42);
+        let text = m.to_prometheus();
+        assert!(
+            text.contains("amaters_cluster_commit_index 42"),
+            "commit_index must be 42 in Prometheus output"
+        );
+
+        // Advance further
+        m.set_commit_index(100);
+        m.set_applied_index(99);
+        let text2 = m.to_prometheus();
+        assert!(
+            text2.contains("amaters_cluster_commit_index 100"),
+            "commit_index must be 100 after advancing"
+        );
+        assert!(
+            text2.contains("amaters_cluster_applied_index 99"),
+            "applied_index must be 99 in Prometheus output"
         );
     }
 }

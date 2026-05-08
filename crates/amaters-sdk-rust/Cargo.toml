@@ -39,7 +39,16 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-test = { workspace = true }
 anyhow = { workspace = true }
+criterion = { workspace = true, features = ["async_tokio"] }
+amaters-net = { workspace = true }
+amaters-core = { workspace = true }
+tokio-stream = { workspace = true }
+
+[[bench]]
+name = "client_bench"
+harness = false
 
 [features]
 default = []

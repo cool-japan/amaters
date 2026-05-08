@@ -1,0 +1,29 @@
+# Security audit configuration for amaters workspace.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: rsa Marvin Attack timing side-channel
+    # Introduced via jsonwebtoken → rsa 0.9.x; no patched version available
+    # upstream.  Suppressed pending rsa crate release with the fix.
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2025-0141: bincode 1.3.3 "unmaintained"
+    # Introduced transitively by: tfhe → tfhe-safe-serialize → bincode 1.3.3
+    # AmateRS code does NOT invoke tfhe-safe-serialize or use bincode directly;
+    # all serialization uses oxicode (COOLJAPAN policy).  The advisory is an
+    # "unmaintained" warning, not an active exploit.  Suppress until upstream
+    # TFHE migrates to bincode 2.x / an alternative.
+    "RUSTSEC-2025-0141",
+
+    # RUSTSEC-2024-0436: paste "no longer maintained"
+    # Introduced transitively by tfhe → paste 1.0.x; paste is a proc-macro
+    # with no exploit surface; advisory is "unmaintained" only.  Suppress
+    # until tfhe migrates to an actively maintained macro alternative.
+    "RUSTSEC-2024-0436",
+
+    # RUSTSEC-2025-0134: rustls-pemfile 2.x "unmaintained"
+    # Introduced by amaters-net → rustls-pemfile 2.2.0; advisory is
+    # "unmaintained" only (rustls-native-certs now bundles PEM parsing).
+    # Suppress until amaters-net upgrades to the bundled API.
+    "RUSTSEC-2025-0134",
+]

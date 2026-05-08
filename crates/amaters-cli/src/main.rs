@@ -6,6 +6,7 @@ mod admin;
 mod batch;
 mod client;
 mod config;
+mod diff;
 mod keys;
 mod output;
 mod progress;
@@ -169,6 +170,25 @@ enum Commands {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+
+    /// Compare two keys (live) or two snapshot files (NDJSON on disk).
+    ///
+    /// Snapshot file format: one JSON object per line: `{"key":"...","value":"..."}`.
+    /// Supports unified diff (default), JSON diff, and summary stats.
+    ///
+    /// Note: FHE ciphertexts cannot be diffed in plaintext form. Decrypt first.
+    Diff {
+        /// First file or key reference (`collection/key`)
+        a: String,
+        /// Second file or key reference (`collection/key`)
+        b: String,
+        /// Treat arguments as snapshot files rather than live keys
+        #[arg(long)]
+        files: bool,
+        /// Output format: unified (default), json, stats
+        #[arg(long, default_value = "unified")]
+        diff_format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -259,6 +279,27 @@ enum KeyCommands {
     Delete {
         /// Key name
         name: String,
+    },
+
+    /// Get or set the default FHE key used when no --key flag is given.
+    ///
+    /// Examples:
+    ///   amaters-cli key default my-key          # set default
+    ///   amaters-cli key default --clear         # unset default
+    ///   amaters-cli key default --show          # display current default
+    ///   amaters-cli key default                 # same as --show
+    ///
+    /// Note: FHE ciphertexts cannot be diffed in plaintext form. If you need
+    /// to diff encrypted values, decrypt them first with the appropriate key.
+    Default {
+        /// Key name to set as default (omit to display current default)
+        name: Option<String>,
+        /// Clear the current default key setting
+        #[arg(long)]
+        clear: bool,
+        /// Show the current default key (default behaviour when no name given)
+        #[arg(long)]
+        show: bool,
     },
 }
 
@@ -352,7 +393,7 @@ async fn main() -> Result<()> {
         .context(format!("Invalid output format: {}", config.output_format))?;
 
     // Execute command
-    if let Err(e) = execute_command(cli.command, &config, output_format).await {
+    if let Err(e) = execute_command(cli.command, &mut config, output_format).await {
         output::print_error(&e, output_format);
         std::process::exit(1);
     }
@@ -360,13 +401,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn execute_command(command: Commands, config: &Config, format: OutputFormat) -> Result<()> {
+async fn execute_command(
+    command: Commands,
+    config: &mut Config,
+    format: OutputFormat,
+) -> Result<()> {
     match command {
         Commands::Config { action } => {
             execute_config_command(action, config)?;
         }
         Commands::Key(key_cmd) => {
-            execute_key_command(key_cmd, format).await?;
+            execute_key_command(key_cmd, config, format).await?;
         }
         Commands::Completions { shell, output } => {
             generate_completions(shell, output)?;
@@ -386,6 +431,14 @@ async fn execute_command(command: Commands, config: &Config, format: OutputForma
             args,
         } => {
             execute_watch(interval_secs, args, config, format).await?;
+        }
+        Commands::Diff {
+            a,
+            b,
+            files,
+            diff_format,
+        } => {
+            execute_diff(a, b, files, &diff_format).await?;
         }
         _ => {
             // Connect to server for all other commands
@@ -441,7 +494,8 @@ async fn execute_command(command: Commands, config: &Config, format: OutputForma
                 | Commands::Key(_)
                 | Commands::Completions { .. }
                 | Commands::Interactive { .. }
-                | Commands::Watch { .. } => {
+                | Commands::Watch { .. }
+                | Commands::Diff { .. } => {
                     // Already handled above
                 }
             }
@@ -741,7 +795,7 @@ async fn execute_watch(
                         .as_deref()
                         .and_then(OutputFormat::from_str)
                         .unwrap_or(format);
-                    if let Err(e) = execute_command(cli.command, &cfg, fmt).await {
+                    if let Err(e) = execute_command(cli.command, &mut cfg, fmt).await {
                         output::print_error(&e, fmt);
                     }
                 }
@@ -783,7 +837,58 @@ fn execute_config_command(action: ConfigAction, _config: &Config) -> Result<()> 
     Ok(())
 }
 
-async fn execute_key_command(command: KeyCommands, format: OutputFormat) -> Result<()> {
+async fn execute_diff(a: String, b: String, files: bool, diff_format_str: &str) -> Result<()> {
+    use diff::{DiffFormat, DiffMode};
+
+    let format = match diff_format_str.to_lowercase().as_str() {
+        "json" => DiffFormat::Json,
+        "stats" => DiffFormat::Stats,
+        _ => DiffFormat::Unified,
+    };
+
+    let mode = if files {
+        DiffMode::Snapshots {
+            a: PathBuf::from(&a),
+            b: PathBuf::from(&b),
+        }
+    } else {
+        // Parse `collection/key` notation.
+        let (coll_a, key_a) = parse_collection_key(&a)?;
+        let (coll_b, key_b) = parse_collection_key(&b)?;
+        DiffMode::Keys {
+            collection_a: coll_a,
+            key_a,
+            collection_b: coll_b,
+            key_b,
+        }
+    };
+
+    let output = diff::run_diff(mode, format).await?;
+    print!("{}", output);
+    Ok(())
+}
+
+/// Parse a `collection/key` string into `(collection, key)`.
+/// Falls back to `("default", key)` if no slash is present.
+fn parse_collection_key(s: &str) -> Result<(String, String)> {
+    match s.find('/') {
+        Some(pos) => {
+            let collection = s[..pos].to_string();
+            let key = s[pos + 1..].to_string();
+            if collection.is_empty() || key.is_empty() {
+                anyhow::bail!("Invalid collection/key reference: '{}'", s);
+            }
+            Ok((collection, key))
+        }
+        None => Ok(("default".to_string(), s.to_string())),
+    }
+}
+
+async fn execute_key_command(
+    command: KeyCommands,
+    config: &mut Config,
+    format: OutputFormat,
+) -> Result<()> {
     let key_manager = keys::KeyManager::new().context("Failed to initialize key manager")?;
 
     match command {
@@ -832,6 +937,10 @@ async fn execute_key_command(command: KeyCommands, format: OutputFormat) -> Resu
             key_manager.delete(&name).context("Failed to delete key")?;
 
             output::print_success(&format!("Deleted key '{}'", name), format)?;
+        }
+        KeyCommands::Default { name, clear, show } => {
+            let config_path = Config::config_path().context("Failed to determine config path")?;
+            keys::handle_key_default(config, &config_path, name, clear, show)?;
         }
     }
 

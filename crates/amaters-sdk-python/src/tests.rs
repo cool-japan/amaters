@@ -7,6 +7,7 @@ use crate::types::{
     BatchResultItem, PyBatchResult, PyKey, PyScanResult, SendableQueryResult,
     query_result_to_sendable,
 };
+use crate::{SATURATED_END_KEY_LEN, prefix_upper_bound, saturated_end_key};
 use amaters_core::{CipherBlob, Key};
 use amaters_sdk_rust::QueryResult;
 
@@ -777,4 +778,226 @@ fn test_stream_iterator_chunk_size_getter() {
         chunk_size: 42,
     };
     assert_eq!(iter.chunk_size(), 42);
+}
+
+// ======== prefix_upper_bound / saturated_end_key tests ========
+
+#[test]
+fn test_prefix_upper_bound_empty_returns_none() {
+    // An empty prefix matches every key, so there is no representable
+    // upper bound.
+    assert!(prefix_upper_bound(b"").is_none());
+}
+
+#[test]
+fn test_prefix_upper_bound_single_byte_increments() {
+    // ``[0x05]`` → ``[0x06]``.
+    let result = prefix_upper_bound(&[0x05]).expect("should return upper bound");
+    assert_eq!(result, vec![0x06]);
+}
+
+#[test]
+fn test_prefix_upper_bound_saturated_bytes_returns_none() {
+    // All-0xFF prefix has no successor in lexicographic order.
+    assert!(prefix_upper_bound(&[0xFF]).is_none());
+    assert!(prefix_upper_bound(&[0xFF, 0xFF]).is_none());
+    assert!(prefix_upper_bound(&[0xFF, 0xFF, 0xFF, 0xFF]).is_none());
+}
+
+#[test]
+fn test_prefix_upper_bound_truncates_trailing_ff() {
+    // ``[0x10, 0x20, 0xFF]`` → ``[0x10, 0x21]``.
+    let result = prefix_upper_bound(&[0x10, 0x20, 0xFF]).expect("should return upper bound");
+    assert_eq!(result, vec![0x10, 0x21]);
+
+    // ``[0x10, 0x20, 0xFF, 0xFF]`` → ``[0x10, 0x21]``.
+    let result =
+        prefix_upper_bound(&[0x10, 0x20, 0xFF, 0xFF]).expect("should return upper bound");
+    assert_eq!(result, vec![0x10, 0x21]);
+}
+
+#[test]
+fn test_prefix_upper_bound_middle_byte_increments() {
+    // ``b"abc"`` → ``b"abd"``.
+    let result = prefix_upper_bound(b"abc").expect("should return upper bound");
+    assert_eq!(result, b"abd".to_vec());
+}
+
+#[test]
+fn test_prefix_upper_bound_ascii_user_prefix() {
+    // ``b"user:"`` → ``b"user;"`` (`':'` = 0x3A → ``';'`` = 0x3B).
+    let result = prefix_upper_bound(b"user:").expect("should return upper bound");
+    assert_eq!(result, b"user;".to_vec());
+}
+
+#[test]
+fn test_prefix_upper_bound_zero_byte_increments() {
+    // ``[0x00]`` → ``[0x01]``.
+    let result = prefix_upper_bound(&[0x00]).expect("should return upper bound");
+    assert_eq!(result, vec![0x01]);
+}
+
+#[test]
+fn test_prefix_upper_bound_all_intermediate_zero() {
+    // ``[0x00, 0x00, 0x05, 0xFF, 0xFF]`` → ``[0x00, 0x00, 0x06]``.
+    let result =
+        prefix_upper_bound(&[0x00, 0x00, 0x05, 0xFF, 0xFF]).expect("should return upper bound");
+    assert_eq!(result, vec![0x00, 0x00, 0x06]);
+}
+
+#[test]
+fn test_saturated_end_key_length() {
+    // The sentinel must always be ``SATURATED_END_KEY_LEN`` bytes.
+    let key = saturated_end_key();
+    assert_eq!(key.len(), SATURATED_END_KEY_LEN);
+    assert!(key.iter().all(|b| *b == 0xFF));
+}
+
+#[test]
+fn test_saturated_end_key_is_strictly_greater_than_any_prefix_match() {
+    // The sentinel must compare strictly greater than every plausible
+    // key sharing a prefix shorter than `SATURATED_END_KEY_LEN`.
+    let sentinel = saturated_end_key();
+
+    let candidate1 = b"user:9999999999".to_vec();
+    let candidate2 = vec![0xFF; SATURATED_END_KEY_LEN - 1];
+    let mut candidate3 = vec![0xFF; SATURATED_END_KEY_LEN - 1];
+    candidate3.push(0xFE);
+
+    assert!(candidate1 < sentinel);
+    assert!(candidate2 < sentinel);
+    assert!(candidate3 < sentinel);
+}
+
+// ======== prefix_query semantic tests against the in-process MockServer ========
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_prefix_query_returns_matching_keys() -> anyhow::Result<()> {
+    use amaters_sdk_rust::AmateRSClient;
+    use amaters_sdk_rust::mock::MockServerBuilder;
+
+    let mock = MockServerBuilder::new()
+        .with_value("user:1", CipherBlob::new(b"alice".to_vec()))
+        .with_value("user:2", CipherBlob::new(b"bob".to_vec()))
+        .with_value("user:3", CipherBlob::new(b"carol".to_vec()))
+        .with_value("admin:1", CipherBlob::new(b"root".to_vec()))
+        .with_value("session:1", CipherBlob::new(b"s1".to_vec()))
+        .start()
+        .await?;
+
+    let client = AmateRSClient::connect(&mock.endpoint()).await?;
+
+    // Mirror what `prefix_query` does internally.
+    let prefix = b"user:".to_vec();
+    let end = prefix_upper_bound(&prefix).unwrap_or_else(saturated_end_key);
+
+    let start_key = Key::new(prefix);
+    let end_key = Key::new(end);
+
+    let results = client.range("default", &start_key, &end_key).await?;
+    let keys: Vec<Vec<u8>> = results.iter().map(|(k, _)| k.as_bytes().to_vec()).collect();
+
+    assert_eq!(keys.len(), 3, "expected only the 3 user:* keys");
+    assert!(keys.contains(&b"user:1".to_vec()));
+    assert!(keys.contains(&b"user:2".to_vec()));
+    assert!(keys.contains(&b"user:3".to_vec()));
+    assert!(!keys.contains(&b"admin:1".to_vec()));
+    assert!(!keys.contains(&b"session:1".to_vec()));
+
+    mock.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_prefix_query_empty_prefix_returns_all() -> anyhow::Result<()> {
+    use amaters_sdk_rust::AmateRSClient;
+    use amaters_sdk_rust::mock::MockServerBuilder;
+
+    let mock = MockServerBuilder::new()
+        .with_value("a", CipherBlob::new(b"1".to_vec()))
+        .with_value("m", CipherBlob::new(b"2".to_vec()))
+        .with_value("z", CipherBlob::new(b"3".to_vec()))
+        .start()
+        .await?;
+
+    let client = AmateRSClient::connect(&mock.endpoint()).await?;
+
+    // Empty prefix → upper bound is None → falls back to saturated sentinel.
+    let prefix: Vec<u8> = Vec::new();
+    let end = prefix_upper_bound(&prefix).unwrap_or_else(saturated_end_key);
+    assert_eq!(end.len(), SATURATED_END_KEY_LEN);
+
+    let start_key = Key::new(prefix);
+    let end_key = Key::new(end);
+
+    let results = client.range("default", &start_key, &end_key).await?;
+    assert_eq!(results.len(), 3, "empty prefix should match every key");
+
+    mock.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_prefix_query_no_matches_returns_empty() -> anyhow::Result<()> {
+    use amaters_sdk_rust::AmateRSClient;
+    use amaters_sdk_rust::mock::MockServerBuilder;
+
+    let mock = MockServerBuilder::new()
+        .with_value("user:1", CipherBlob::new(b"alice".to_vec()))
+        .with_value("user:2", CipherBlob::new(b"bob".to_vec()))
+        .start()
+        .await?;
+
+    let client = AmateRSClient::connect(&mock.endpoint()).await?;
+
+    let prefix = b"missing:".to_vec();
+    let end = prefix_upper_bound(&prefix).unwrap_or_else(saturated_end_key);
+
+    let start_key = Key::new(prefix);
+    let end_key = Key::new(end);
+
+    let results = client.range("default", &start_key, &end_key).await?;
+    assert!(results.is_empty(), "no keys should match a non-existent prefix");
+
+    mock.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_prefix_query_saturated_prefix_uses_sentinel() -> anyhow::Result<()> {
+    use amaters_sdk_rust::AmateRSClient;
+    use amaters_sdk_rust::mock::MockServerBuilder;
+
+    // Pre-populate two keys whose first byte is 0xFF and one that is not.
+    let key_a = Key::new(vec![0xFF, 0x01]);
+    let key_b = Key::new(vec![0xFF, 0x02]);
+    let key_c = Key::new(vec![0x10, 0x01]);
+
+    let mock = MockServerBuilder::new()
+        .with_value(key_a.clone(), CipherBlob::new(b"a".to_vec()))
+        .with_value(key_b.clone(), CipherBlob::new(b"b".to_vec()))
+        .with_value(key_c.clone(), CipherBlob::new(b"c".to_vec()))
+        .start()
+        .await?;
+
+    let client = AmateRSClient::connect(&mock.endpoint()).await?;
+
+    // Prefix [0xFF] saturates → upper bound is None → sentinel kicks in.
+    let prefix = vec![0xFFu8];
+    let end = prefix_upper_bound(&prefix).unwrap_or_else(saturated_end_key);
+    assert_eq!(end.len(), SATURATED_END_KEY_LEN);
+
+    let start_key = Key::new(prefix);
+    let end_key = Key::new(end);
+
+    let results = client.range("default", &start_key, &end_key).await?;
+    let keys: Vec<Vec<u8>> = results.iter().map(|(k, _)| k.as_bytes().to_vec()).collect();
+
+    assert_eq!(keys.len(), 2);
+    assert!(keys.contains(&vec![0xFF, 0x01]));
+    assert!(keys.contains(&vec![0xFF, 0x02]));
+    assert!(!keys.contains(&vec![0x10, 0x01]));
+
+    mock.shutdown().await;
+    Ok(())
 }

@@ -48,6 +48,10 @@ pub enum SdkError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// Invalid state transition (e.g. double-commit, rollback after commit)
+    #[error("invalid state: {0}")]
+    InvalidState(String),
+
     /// Not found
     #[error("not found: {0}")]
     NotFound(String),

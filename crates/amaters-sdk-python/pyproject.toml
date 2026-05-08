@@ -50,7 +50,11 @@ Repository = "https://github.com/cool-japan/amaters"
 [tool.maturin]
 python-source = "python"
 module-name = "amaters._internal"
-features = ["extension-module"]
+# Pyo3 0.28 deprecated the `extension-module` Cargo feature.  Linking is
+# now driven by the `PYO3_BUILD_EXTENSION_MODULE=1` environment variable
+# (see ``build.rs`` in this crate).  ``maturin`` exports that variable
+# automatically when building the wheel; tests link against ``libpython``
+# normally.
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

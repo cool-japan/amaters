@@ -31,3 +31,56 @@ Cargo.lock
 
 # Rustc ICE dumps
 rustc-ice-*.txt
+
+# Python
+__pycache__/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+*.so
+*.dylib
+*.dll
+*.a
+
+# Python distribution / packaging
+dist/
+build/
+**/*.egg-info/
+**/*.egg
+.eggs/
+*.whl
+MANIFEST
+
+# Python virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python testing / tooling
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# Jupyter
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# maturin / PyO3 build artifacts
+**/*.pyi.bak
+_maturin/

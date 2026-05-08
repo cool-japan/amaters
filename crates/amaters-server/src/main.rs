@@ -4,12 +4,16 @@
 
 mod cli;
 
-use amaters_server::config::{ConfigError, ServerConfig};
-use amaters_server::server::{Server, ServerError};
+use amaters_server::config::ServerConfig;
+use amaters_server::hot_reload::{HotReloadError, TlsCreds, spawn_config_reloader, spawn_tls_reloader};
+use amaters_server::server::Server;
 use amaters_server::shutdown::setup_signal_handlers;
+use arc_swap::ArcSwap;
 use cli::{Cli, Command, StatusFormat};
+use parking_lot::RwLock;
 use std::process;
-use tracing::{Level, error, info};
+use std::sync::Arc;
+use tracing::{Level, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Main entry point
@@ -116,6 +120,69 @@ async fn handle_start(
         return Err("Server is already running".into());
     }
 
+    // Shared mutable config for hot-reload support.
+    let shared_config = Arc::new(RwLock::new(config.clone()));
+
+    // Spawn SIGHUP config reloader.
+    //
+    // NOTE: Server holds an immutable Arc<ServerConfig> snapshot built at
+    // start time; SIGHUP reload updates `shared_config` but the Server's
+    // internal snapshot remains frozen until it is refactored to read from
+    // a shared lock at runtime (Phase 9 work).  The reloadable sections
+    // (logging, metrics, rate-limits, compaction) will take effect for any
+    // code that reads from `shared_config` directly.
+    let config_path = cli.config_path();
+    if config_path.exists() {
+        spawn_config_reloader(config_path.to_path_buf(), Arc::clone(&shared_config)).await;
+    } else {
+        warn!(
+            "Config file not found at {:?}; SIGHUP reload will be a no-op",
+            config_path
+        );
+    }
+
+    // Spawn TLS certificate file watcher when TLS is enabled.
+    //
+    // NOTE: tonic's ServerTlsConfig is consumed once at serve_with_shutdown
+    // time.  The ArcSwap<TlsCreds> store is kept live so a custom rustls
+    // acceptor (Phase 9) can read the latest credentials per-handshake.
+    // Until that acceptor is wired, this watcher logs rotations but the
+    // live server continues using the cert negotiated at startup.
+    if config.network.tls_enabled {
+        if let (Some(cert_path), Some(key_path)) =
+            (&config.network.tls_cert, &config.network.tls_key)
+        {
+            match TlsCreds::load_from_files(cert_path, key_path) {
+                Ok(initial_creds) => {
+                    let tls_store: Arc<ArcSwap<TlsCreds>> =
+                        Arc::new(ArcSwap::from_pointee(initial_creds));
+                    match spawn_tls_reloader(
+                        cert_path.clone(),
+                        key_path.clone(),
+                        Arc::clone(&tls_store),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            info!(
+                                "TLS file watcher active — live cert rotation requires \
+                                 custom rustls acceptor (Phase 9)"
+                            );
+                        }
+                        Err(e) => {
+                            warn!("TLS reloader could not start, continuing without live cert rotation: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(
+                        format!("Failed to load initial TLS credentials: {}", e).into()
+                    );
+                }
+            }
+        }
+    }
+
     // Create and initialize server
     let mut server = Server::new(config.clone());
     server
@@ -123,7 +190,7 @@ async fn handle_start(
         .await
         .map_err(|e| format!("Server initialization failed: {}", e))?;
 
-    // Setup signal handlers
+    // Setup signal handlers (SIGTERM / SIGINT for graceful shutdown)
     let shutdown_coordinator = server.shutdown_coordinator().clone();
     setup_signal_handlers(shutdown_coordinator.clone()).await;
 

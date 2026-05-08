@@ -10,17 +10,35 @@
 //!   within a key epoch.
 //! - HMAC-SHA256 is computed over `entry_index_le || nonce || ciphertext` to provide
 //!   additional chain integrity beyond what GCM authentication already gives.
+//! - **Key rotation:** [`EntryEncryptor`] holds an `Arc<RwLock<KeyManager>>`; each
+//!   [`EncryptedPayload`] carries the [`crate::key_rotation::KeyVersion`] it was
+//!   encrypted under so that decryption can look up the right historical key after
+//!   the master key has been rotated.  See [`crate::key_rotation::KeyManager`].
+//!
+//! ## Schema migration
+//!
+//! [`EncryptedPayload::key_version`] uses `#[serde(default)]` so any future
+//! deserialization of legacy payloads (serialized before this field
+//! existed) defaults to [`crate::key_rotation::LEGACY_KEY_VERSION`] (= 0).
+//! There is currently no on-disk persistence of `EncryptedPayload`, so this
+//! is forward-looking insurance for when a future cycle wires it through
+//! `oxicode` or another serde encoder.
+
+use std::sync::Arc;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 // Bring KeyInit into scope explicitly so disambiguating `<HmacSha256 as KeyInit>::new_from_slice`
 // is not needed at every call site.  We re-alias it to avoid shadowing `hmac::Mac`.
 
 use crate::error::{RaftError, RaftResult};
+use crate::key_rotation::{KeyManager, KeyVersion, LEGACY_KEY_VERSION};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -51,6 +69,15 @@ impl LogEncryptionKey {
             ),
         })?;
         Ok(Self { key_bytes })
+    }
+
+    /// Borrow the raw 32-byte master key material.
+    ///
+    /// Used internally by [`EntryEncryptor`] to drive HKDF.  Exposed at
+    /// `pub(crate)` visibility so the [`crate::key_rotation`] module can
+    /// keep [`LogEncryptionKey`] opaque to external callers.
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.key_bytes
     }
 
     /// Generate a random [`LogEncryptionKey`] without an external RNG crate.
@@ -121,12 +148,35 @@ impl LogEncryptionKey {
 // ──────────────────────────────────────────────
 
 /// The encrypted form of a single Raft log entry payload.
-#[derive(Debug, Clone)]
+///
+/// `key_version` records which [`crate::key_rotation::KeyVersion`] of the
+/// master key was used to derive the per-entry AES key.  Decryption looks
+/// the version up in the corresponding [`crate::key_rotation::KeyManager`]
+/// so historical payloads remain decryptable after rotation.
+///
+/// The `key_version` field uses `#[serde(default)]`, so any future
+/// deserialization of pre-rotation payloads parses with version
+/// [`crate::key_rotation::LEGACY_KEY_VERSION`] (= 0).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedPayload {
     /// Ciphertext produced by AES-256-GCM, including the 16-byte authentication tag.
     pub ciphertext: Vec<u8>,
     /// The 12-byte nonce used during encryption (derived from master key + entry index).
     pub nonce: [u8; 12],
+    /// Version of the master key used during encryption.
+    ///
+    /// Defaults to [`LEGACY_KEY_VERSION`] (= 0) when absent from a
+    /// serialized form, providing forward compatibility with payloads
+    /// written before key rotation existed.
+    #[serde(default = "default_key_version")]
+    pub key_version: KeyVersion,
+}
+
+/// Default value for [`EncryptedPayload::key_version`] — `0`, the legacy
+/// sentinel.  Used by serde when the field is missing in a deserialized
+/// payload.
+fn default_key_version() -> KeyVersion {
+    LEGACY_KEY_VERSION
 }
 
 // ──────────────────────────────────────────────
@@ -138,19 +188,52 @@ pub struct EncryptedPayload {
 /// The AES key **and** nonce for each entry are deterministically derived from
 /// the master key and the entry index via HKDF-SHA256, ensuring unique key material
 /// per entry without the need for a random nonce.
+///
+/// Internally backed by an `Arc<RwLock<KeyManager>>` so that key rotation
+/// is supported transparently.  [`EntryEncryptor::new`] wraps a single key
+/// in a 1-version `KeyManager`; [`EntryEncryptor::with_key_manager`] takes
+/// a shared `KeyManager` for the rotation-aware path.
 pub struct EntryEncryptor {
-    master_key: LogEncryptionKey,
+    keys: Arc<RwLock<KeyManager>>,
 }
 
 impl EntryEncryptor {
-    /// Create a new [`EntryEncryptor`] backed by `key`.
+    /// Create a new [`EntryEncryptor`] backed by a single fixed key.
+    ///
+    /// Convenience constructor: wraps `key` in a one-version
+    /// [`KeyManager`] internally.  Equivalent to
+    /// `EntryEncryptor::with_key_manager(Arc::new(RwLock::new(KeyManager::new(key, 1))))`.
     pub fn new(key: LogEncryptionKey) -> Self {
-        Self { master_key: key }
+        let mgr = KeyManager::new(key, 1);
+        Self {
+            keys: Arc::new(RwLock::new(mgr)),
+        }
     }
 
-    /// Derive the per-entry AES-256-GCM key (32 bytes) and nonce (12 bytes).
-    fn derive_key_and_nonce(&self, entry_index: u64) -> RaftResult<([u8; 32], [u8; 12])> {
-        let hk = Hkdf::<Sha256>::new(None, &self.master_key.key_bytes);
+    /// Create an [`EntryEncryptor`] backed by a shared, rotation-aware
+    /// [`KeyManager`].
+    ///
+    /// Both encryption and decryption read through the manager.  Encryption
+    /// always uses the manager's current key (and tags the resulting
+    /// payload with that version); decryption looks up the version stored
+    /// in the payload.
+    pub fn with_key_manager(keys: Arc<RwLock<KeyManager>>) -> Self {
+        Self { keys }
+    }
+
+    /// Borrow the inner [`KeyManager`] handle for callers that want to
+    /// drive rotation directly.
+    pub fn key_manager(&self) -> &Arc<RwLock<KeyManager>> {
+        &self.keys
+    }
+
+    /// Derive the per-entry AES-256-GCM key (32 bytes) and nonce (12 bytes)
+    /// from a specific master key.
+    fn derive_key_and_nonce_from(
+        master_key: &LogEncryptionKey,
+        entry_index: u64,
+    ) -> RaftResult<([u8; 32], [u8; 12])> {
+        let hk = Hkdf::<Sha256>::new(None, master_key.as_bytes());
         let mut derived = [0u8; 44]; // 32 bytes key + 12 bytes nonce
         hk.expand(&entry_index.to_le_bytes(), &mut derived)
             .map_err(|e| RaftError::StorageError {
@@ -164,15 +247,19 @@ impl EntryEncryptor {
         Ok((key, nonce))
     }
 
-    /// Encrypt `plaintext` associated with `entry_index`.
+    /// Encrypt `plaintext` associated with `entry_index` using the current
+    /// key version.
     ///
-    /// The returned [`EncryptedPayload`] contains the GCM ciphertext (with auth tag)
-    /// and the nonce that was used.
+    /// The returned [`EncryptedPayload`] contains the GCM ciphertext (with auth tag),
+    /// the nonce that was used, and the [`KeyVersion`] of the master key.
     ///
     /// # Errors
     /// Returns [`RaftError::StorageError`] on any cryptographic failure.
     pub fn encrypt(&self, entry_index: u64, plaintext: &[u8]) -> RaftResult<EncryptedPayload> {
-        let (key_bytes, nonce_bytes) = self.derive_key_and_nonce(entry_index)?;
+        let guard = self.keys.read();
+        let (key_version, master_key) = guard.current();
+        let (key_bytes, nonce_bytes) =
+            Self::derive_key_and_nonce_from(master_key, entry_index)?;
 
         let key = Key::<Aes256Gcm>::from(key_bytes);
         let cipher = Aes256Gcm::new(&key);
@@ -188,19 +275,35 @@ impl EntryEncryptor {
         Ok(EncryptedPayload {
             ciphertext,
             nonce: nonce_bytes,
+            key_version,
         })
     }
 
     /// Decrypt `payload` associated with `entry_index`.
     ///
-    /// The AES key is re-derived from the master key and `entry_index`.
-    /// The nonce stored in the payload is used for decryption.
+    /// The AES key is re-derived from the master key whose version is
+    /// recorded in `payload.key_version` (looked up in the
+    /// [`KeyManager`]).  The nonce stored in the payload is used for
+    /// decryption.
     ///
     /// # Errors
-    /// Returns [`RaftError::StorageError`] on key derivation failure or GCM
-    /// authentication failure (including tampered ciphertext).
+    /// Returns [`RaftError::StorageError`] when the recorded key version
+    /// has been pruned from the [`KeyManager`] history, when key
+    /// derivation fails, or when GCM authentication fails (including
+    /// tampered ciphertext).
     pub fn decrypt(&self, entry_index: u64, payload: &EncryptedPayload) -> RaftResult<Vec<u8>> {
-        let (key_bytes, _derived_nonce) = self.derive_key_and_nonce(entry_index)?;
+        let guard = self.keys.read();
+        let master_key =
+            guard
+                .lookup(payload.key_version)
+                .ok_or_else(|| RaftError::StorageError {
+                    message: format!(
+                        "EntryEncryptor::decrypt: key version {} not in KeyManager (history exhausted or unknown)",
+                        payload.key_version
+                    ),
+                })?;
+        let (key_bytes, _derived_nonce) =
+            Self::derive_key_and_nonce_from(master_key, entry_index)?;
 
         let key = Key::<Aes256Gcm>::from(key_bytes);
         let cipher = Aes256Gcm::new(&key);
@@ -313,6 +416,7 @@ mod tests {
         let payload = EncryptedPayload {
             ciphertext: vec![0xde, 0xad, 0xbe, 0xef],
             nonce: [0u8; 12],
+            key_version: 1,
         };
 
         let tag = verifier.compute(7, &payload);
@@ -328,6 +432,7 @@ mod tests {
         let mut payload = EncryptedPayload {
             ciphertext: vec![0x01, 0x02, 0x03, 0x04, 0x05],
             nonce: [0u8; 12],
+            key_version: 1,
         };
 
         let tag = verifier.compute(99, &payload);
@@ -379,5 +484,122 @@ mod tests {
             decrypted.is_empty(),
             "round-tripped empty plaintext must be empty"
         );
+    }
+
+    // ──────────────────────────────────────────
+    // Key rotation integration tests
+    // ──────────────────────────────────────────
+
+    #[test]
+    fn test_entry_encryptor_uses_current_key_for_encrypt() {
+        let mgr = KeyManager::new(LogEncryptionKey::new([0x01; 32]), 3);
+        let mgr = Arc::new(RwLock::new(mgr));
+        let encryptor = EntryEncryptor::with_key_manager(Arc::clone(&mgr));
+
+        // Initial encryption tags payload with version 1.
+        let payload_v1 = encryptor.encrypt(7, b"hello").expect("encrypt v1");
+        assert_eq!(payload_v1.key_version, 1);
+
+        // Rotate; subsequent encryptions tag with version 2.
+        mgr.write().rotate(LogEncryptionKey::new([0x02; 32]));
+        let payload_v2 = encryptor.encrypt(8, b"hello").expect("encrypt v2");
+        assert_eq!(payload_v2.key_version, 2);
+    }
+
+    #[test]
+    fn test_entry_encryptor_uses_payload_version_for_decrypt() {
+        let k1 = LogEncryptionKey::new([0x11; 32]);
+        let k2 = LogEncryptionKey::new([0x22; 32]);
+        let mgr = Arc::new(RwLock::new(KeyManager::new(k1, 3)));
+        let encryptor = EntryEncryptor::with_key_manager(Arc::clone(&mgr));
+
+        // Encrypt under v1.
+        let payload_v1 = encryptor.encrypt(100, b"under-v1").expect("encrypt v1");
+        assert_eq!(payload_v1.key_version, 1);
+
+        // Rotate to v2 and encrypt a different entry.
+        mgr.write().rotate(k2);
+        let payload_v2 = encryptor.encrypt(101, b"under-v2").expect("encrypt v2");
+        assert_eq!(payload_v2.key_version, 2);
+
+        // Both must decrypt back to their original plaintexts using the
+        // version recorded in each payload.
+        let pt_v1 = encryptor.decrypt(100, &payload_v1).expect("decrypt v1");
+        assert_eq!(pt_v1.as_slice(), b"under-v1");
+
+        let pt_v2 = encryptor.decrypt(101, &payload_v2).expect("decrypt v2");
+        assert_eq!(pt_v2.as_slice(), b"under-v2");
+    }
+
+    #[test]
+    fn test_key_manager_decrypts_old_version_payload() {
+        // Bold-scope test: rotation must not invalidate entries encrypted
+        // under earlier key versions while they remain inside the
+        // retention window.  Mutating the v1 ciphertext to use the v2 key
+        // would fail GCM authentication, so this test really exercises
+        // historical-key lookup, not "key never changed."
+        let k1 = LogEncryptionKey::new([0xaa; 32]);
+        let k2 = LogEncryptionKey::new([0xbb; 32]);
+        let k3 = LogEncryptionKey::new([0xcc; 32]);
+        let mgr = Arc::new(RwLock::new(KeyManager::new(k1, 3)));
+        let encryptor = EntryEncryptor::with_key_manager(Arc::clone(&mgr));
+
+        let payload_v1 = encryptor.encrypt(42, b"persisted-under-v1").expect("encrypt");
+        assert_eq!(payload_v1.key_version, 1);
+
+        // Rotate twice — v1 key must still be retained because retention=3.
+        mgr.write().rotate(k2);
+        mgr.write().rotate(k3);
+
+        let recovered = encryptor
+            .decrypt(42, &payload_v1)
+            .expect("decrypt under historical key v1 must succeed");
+        assert_eq!(recovered.as_slice(), b"persisted-under-v1");
+
+        // Sanity: corrupting the ciphertext must still fail (GCM auth).
+        let mut tampered = payload_v1.clone();
+        tampered.ciphertext[0] ^= 0xff;
+        assert!(
+            encryptor.decrypt(42, &tampered).is_err(),
+            "tampered ciphertext must still fail authentication post-rotation"
+        );
+    }
+
+    #[test]
+    fn test_decrypt_fails_when_key_version_pruned() {
+        // retention = 1 means rotation immediately drops the previous key,
+        // so a payload encrypted before rotation cannot be decrypted afterward.
+        let k1 = LogEncryptionKey::new([0x01; 32]);
+        let k2 = LogEncryptionKey::new([0x02; 32]);
+        let mgr = Arc::new(RwLock::new(KeyManager::new(k1, 1)));
+        let encryptor = EntryEncryptor::with_key_manager(Arc::clone(&mgr));
+
+        let payload_v1 = encryptor.encrypt(0, b"will-be-lost").expect("encrypt");
+        mgr.write().rotate(k2);
+
+        let result = encryptor.decrypt(0, &payload_v1);
+        assert!(
+            result.is_err(),
+            "decryption of pruned key version must surface a clear error"
+        );
+    }
+
+    #[test]
+    fn test_encrypted_payload_serde_default_key_version() {
+        // Forward-compatibility: a serialized payload without `key_version`
+        // must default to LEGACY_KEY_VERSION (= 0) when deserialized.
+        // Use JSON via serde_json (already in workspace) for the test.
+        let json = r#"{"ciphertext":[1,2,3,4],"nonce":[0,0,0,0,0,0,0,0,0,0,0,0]}"#;
+        let payload: EncryptedPayload =
+            serde_json::from_str(json).expect("legacy payload must deserialize");
+        assert_eq!(payload.key_version, LEGACY_KEY_VERSION);
+        assert_eq!(payload.ciphertext, vec![1, 2, 3, 4]);
+
+        // Round-trip with key_version present.
+        let with_version =
+            r#"{"ciphertext":[5,6],"nonce":[1,2,3,4,5,6,7,8,9,10,11,12],"key_version":7}"#;
+        let payload: EncryptedPayload =
+            serde_json::from_str(with_version).expect("v-tagged payload must deserialize");
+        assert_eq!(payload.key_version, 7);
     }
 }

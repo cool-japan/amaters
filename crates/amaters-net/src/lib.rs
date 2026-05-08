@@ -45,13 +45,18 @@ pub mod auth;
 pub mod balancer;
 pub mod circuit_breaker;
 pub mod client;
+pub mod config;
 pub mod convert;
 pub mod error;
 pub mod grpc_service;
+pub mod logging_layer;
 pub mod metrics_layer;
 pub mod pool;
 pub mod rate_limiter;
 pub mod server;
+pub mod server_admin;
+pub mod server_builder;
+pub mod server_types;
 pub mod tracing_middleware;
 
 // mTLS module (feature-gated)
@@ -61,6 +66,8 @@ pub mod mtls;
 pub mod ocsp;
 #[cfg(feature = "mtls")]
 pub mod tls;
+#[cfg(feature = "mtls")]
+pub mod tls_acceptor;
 #[cfg(feature = "mtls")]
 pub mod tls_crypto;
 
@@ -89,8 +96,19 @@ pub mod proto {
 }
 
 // Re-exports for convenience
+pub use config::{
+    AuthSection, LogVerbosityWire, LoggingSection, MetricsSection, NetConfig, NetSection,
+    RateLimitSection, TlsSection,
+};
 pub use error::{NetError, NetResult};
-pub use server::{AqlServerBuilder, AqlServiceImpl, StreamConfig};
+pub use logging_layer::{LogVerbosity, LoggingLayer, LoggingService};
+pub use metrics_layer::{NetMetrics, spawn_metrics_server};
+pub use server::{AqlServerBuilder, AqlServiceImpl};
+pub use server_types::StreamConfig;
+
+// TLS acceptor re-exports (feature-gated)
+#[cfg(feature = "mtls")]
+pub use tls_acceptor::{LiveTlsAcceptor, TlsCredsRef, build_rustls_config};
 
 // mTLS re-exports
 #[cfg(feature = "mtls")]

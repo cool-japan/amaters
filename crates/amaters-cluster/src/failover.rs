@@ -244,6 +244,18 @@ impl FailoverCoordinator {
         self.current_leader
     }
 
+    /// Returns `true` if this node should redirect clients to the current leader.
+    ///
+    /// A node should redirect when there is a known leader that is not this node.
+    /// If the leader is unknown (election in progress), returns `false` so that
+    /// the caller can try locally or return a generic "leader unknown" error.
+    pub fn should_redirect(&self, my_id: NodeId) -> bool {
+        match self.current_leader {
+            Some(leader) => leader != my_id,
+            None => false,
+        }
+    }
+
     // ── Tick ────────────────────────────────────────────────────────
 
     /// Advance the coordinator by one tick.
@@ -694,5 +706,95 @@ mod tests {
         let dbg = format!("{:?}", coord);
         assert!(dbg.contains("FailoverCoordinator"));
         assert!(dbg.contains("self_id"));
+    }
+
+    /// After leader loss (set to None), should_redirect returns false because no
+    /// leader hint is known. Once a new leader is elected and set, should_redirect
+    /// returns true for non-leader nodes and false for the leader itself.
+    #[test]
+    fn test_failover_redirects_after_leader_loss() {
+        let mut coord =
+            FailoverCoordinator::new(HeartbeatConfig::default(), FailoverConfig::default(), 1);
+
+        // No leader known yet — should not redirect (unknown destination)
+        assert!(!coord.should_redirect(1), "no redirect when leader is unknown");
+        assert!(!coord.should_redirect(2), "no redirect when leader is unknown");
+
+        // Set node 2 as leader
+        coord.set_leader(2);
+        // Node 1 (self) should redirect to node 2
+        assert!(
+            coord.should_redirect(1),
+            "node 1 should redirect when leader is node 2"
+        );
+        // Node 2 (the leader) should not redirect to itself
+        assert!(
+            !coord.should_redirect(2),
+            "node 2 should not redirect when it is the leader"
+        );
+
+        // Simulate leader loss
+        coord.clear_leader();
+        // After loss, no redirect (leader unknown — election in progress)
+        assert!(
+            !coord.should_redirect(1),
+            "no redirect when leader just lost (election pending)"
+        );
+
+        // New leader (node 3) elected after recovery
+        coord.set_leader(3);
+        assert!(
+            coord.should_redirect(1),
+            "node 1 should redirect to new leader node 3"
+        );
+        assert!(
+            coord.should_redirect(2),
+            "node 2 should redirect to new leader node 3"
+        );
+        assert!(
+            !coord.should_redirect(3),
+            "node 3 should not redirect to itself"
+        );
+    }
+
+    /// A follower failure (non-leader peer) must not change the redirect behaviour;
+    /// the leader_hint should remain pointing to the known leader.
+    #[test]
+    fn test_failover_no_redirect_on_follower_loss() {
+        let mut coord =
+            FailoverCoordinator::new(fast_heartbeat_config(), fast_failover_config(), 1);
+        coord.track_peer(2).expect("track peer 2");
+        coord.track_peer(3).expect("track peer 3");
+        // Node 2 is the leader; node 3 is a follower
+        coord.set_leader(2);
+
+        // Node 3 (follower) times out — keep leader heartbeat alive
+        thread::sleep(Duration::from_millis(50));
+        coord.record_heartbeat(2).expect("leader heartbeat");
+        let events = coord.tick().expect("tick");
+
+        // Node 3 should be reported as failed
+        let peer_failed = events
+            .iter()
+            .any(|e| matches!(e, FailoverEvent::PeerFailed { node_id: 3 }));
+        assert!(peer_failed, "Expected PeerFailed for node 3");
+
+        // The leader hint must still point to node 2
+        assert_eq!(
+            coord.leader_hint(),
+            Some(2),
+            "leader hint should still be node 2 after follower loss"
+        );
+
+        // Redirect logic: node 1 should still redirect to node 2
+        assert!(
+            coord.should_redirect(1),
+            "node 1 should still redirect to leader 2 after follower 3 fails"
+        );
+        // No election should have been triggered by the follower failure
+        assert!(
+            !coord.is_election_pending(),
+            "election must not be triggered by non-leader failure"
+        );
     }
 }

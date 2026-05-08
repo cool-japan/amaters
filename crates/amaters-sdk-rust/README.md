@@ -154,6 +154,14 @@ cargo test
 cargo test --all-features
 ```
 
+## Documentation
+
+Long-form documentation lives under [`docs/`](docs/):
+
+- [Tutorial](docs/tutorial.md) — end-to-end walkthrough of `connect`, `set` / `get` / `delete` / `contains`, range queries, pagination, streaming, transactions, `MockServer`, and `CacheLayer`.
+- [Cookbook](docs/cookbook.md) — focused snippets for pagination loops, prefix scans, batch upsert, retry tuning, transaction reads, mock-server testing, and cancellable streaming.
+- [Migration: 0.1.x → 0.2.x](docs/migration.md) — breaking changes (`get` returns `Option`, cursor-based pagination), additive features (transactions, mock server, cache).
+
 ## License
 
 Apache-2.0

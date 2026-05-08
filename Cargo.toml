@@ -56,6 +56,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-layer = "0.3"
 tower-service = "0.3"
 http = "1.4"
+axum = "0.8"
 jsonwebtoken = { version = "9.3", features = ["use_pem"] }
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
@@ -118,6 +119,14 @@ quickcheck = "1.1"
 quickcheck_macros = "1.2"
 approx = "0.5"
 tracing-test = "0.2"
+serial_test = "3.2"
+
+# Hot reload and atomic pointer swap
+arc-swap = "1.9"
+notify = "8.2"   # Cross-platform filesystem notifications (pure Rust on Linux)
+
+# Diff
+similar = "3.1.0"
 
 # Benchmarking
 criterion = { version = "0.8", features = ["html_reports"] }

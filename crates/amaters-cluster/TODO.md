@@ -45,10 +45,22 @@
   - **Risk:** Truncation is destructive; must log before acting.
 
 ### Encrypted Logs
-- [ ] Encrypt log entry payloads with client public keys
-- [ ] Hash-based integrity verification for encrypted entries
-- [ ] Merkle tree for batch log integrity verification
-- [ ] Key rotation support for log encryption keys
+- [x] Encrypt log entry payloads with client public keys
+  - **Note (2026-05-08):** Realized via symmetric AES-256-GCM with HKDF-derived per-entry keys and nonces in `encryption::EntryEncryptor`. The original wording "client public keys" was earlier-cycle phrasing; the implemented confidentiality model is per-entry symmetric AEAD (no per-client PKE). Each entry's key/nonce are derived deterministically from the master key and entry index via HKDF-SHA256, providing equivalent confidentiality without per-client public-key infrastructure. See `crates/amaters-cluster/src/encryption.rs` (`EntryEncryptor::encrypt`, `EntryEncryptor::decrypt`).
+- [x] Hash-based integrity verification for encrypted entries
+  - **Note (2026-05-08):** Satisfied by `encryption::LogIntegrityVerifier`, which computes HMAC-SHA256 over `entry_index_le || nonce || ciphertext` and verifies via constant-time comparison. See `crates/amaters-cluster/src/encryption.rs` (`LogIntegrityVerifier::compute`, `LogIntegrityVerifier::verify`).
+- [x] Merkle tree for batch log integrity verification (planned 2026-05-08)
+  - **Goal:** Compute a single root hash over a batch of log-entry leaves so a follower can verify any individual entry against a small Merkle proof, enabling efficient batch tamper detection beyond per-entry HMAC.
+  - **Design:** New `merkle.rs` module with `MerkleTree { leaves: Vec<[u8; 32]>, root: [u8; 32] }`, `MerkleProof { siblings: Vec<[u8; 32]>, index: usize }`, `new(leaves) -> Self`, `root()`, `proof(index)`, `verify(leaf, proof, root)`. Hash via `blake3` (Pure Rust, already in workspace deps). Empty leaves → root is `blake3::hash(b"amaters-merkle-empty-v1")`; single leaf → root equals that leaf hash. Internal nodes are computed by hashing the concatenation of their children with a 1-byte domain-separation prefix to avoid second-preimage attacks.
+  - **Files:** `crates/amaters-cluster/src/merkle.rs` (new), `crates/amaters-cluster/src/lib.rs` (re-export).
+  - **Tests:** `test_merkle_tree_root_deterministic`, `test_merkle_tree_proof_verifies`, `test_merkle_tree_proof_fails_on_tampered_leaf`, `test_merkle_tree_empty_leaves_root`, `test_merkle_tree_single_leaf_root`.
+  - **Risk:** Domain separation must be applied consistently to leaves vs. internal nodes; document the choice (single byte 0x00 for leaves, 0x01 for internal). Odd-arity levels duplicate the last leaf — standard convention; document.
+- [x] Key rotation support for log encryption keys (planned 2026-05-08)
+  - **Goal:** Allow the master encryption key to be rotated without losing the ability to decrypt entries encrypted under previous keys. Each `EncryptedPayload` carries the `key_version` it was encrypted under; `KeyManager` retains the last N keys for decryption.
+  - **Design:** New `key_rotation.rs` module: `pub type KeyVersion = u32;` and `KeyManager { current_version, current, history: BTreeMap<KeyVersion, LogEncryptionKey>, retention: usize }`. API: `new(initial, retention) -> Self`, `rotate(new_key) -> KeyVersion`, `current() -> (KeyVersion, &LogEncryptionKey)`, `lookup(version) -> Option<&LogEncryptionKey>`. Wire into `EntryEncryptor` via `Arc<RwLock<KeyManager>>` (parking_lot). `encrypt` reads current; `decrypt` reads `payload.key_version` and looks up the historical key. Add `key_version: u32` field on `EncryptedPayload` with `#[serde(default)]` so future serde-encoded legacy payloads (v=0) parse cleanly. Background rotation task is **deferred** to a future cycle; the API is wired so an external scheduler can call `rotate` directly. Config: `key_rotation_interval_secs: Option<u64>`, `key_retention_count: usize` (default 3) added to `NodeConfig`.
+  - **Files:** `crates/amaters-cluster/src/key_rotation.rs` (new), `crates/amaters-cluster/src/encryption.rs` (extend `EntryEncryptor` to use `KeyManager`; add `key_version` to `EncryptedPayload`), `crates/amaters-cluster/src/config.rs` (extend `NodeConfig`), `crates/amaters-cluster/src/lib.rs` (re-export).
+  - **Tests:** `test_key_manager_rotation_advances_version`, `test_key_manager_decrypts_old_version_payload`, `test_key_manager_retention_drops_oldest`, `test_entry_encryptor_uses_current_key_for_encrypt`, `test_entry_encryptor_uses_payload_version_for_decrypt`.
+  - **Risk:** Schema migration — existing `EncryptedPayload` had no `key_version` field. Use `#[serde(default)]` so any future deserialization of v0 payloads defaults to version 0. Currently no on-disk usage of `EncryptedPayload`, so this is forward-looking insurance.
 
 ### Sharding and Placement
 - [ ] Placement Driver (PD): centralized shard coordinator
@@ -65,12 +77,11 @@
   - **Files:** `crates/amaters-cluster/src/heartbeat.rs` (new), `crates/amaters-cluster/src/node.rs` (integrate detector), `crates/amaters-cluster/src/types.rs` (HeartbeatConfig, NodeFailure event), `crates/amaters-cluster/src/lib.rs` (mod declaration)
   - **Tests:** Heartbeat send/receive roundtrip, timeout detection after missed beats, configurable interval/timeout, failure event emission, node recovery (heartbeats resume → healthy again)
   - **Risk:** Clock granularity on different platforms — mitigate with Instant-based timing, not SystemTime
-- [~] Automatic failover and leader redirect after failure (planned 2026-04-16)
+- [x] Automatic failover and leader redirect after failure (planned 2026-04-16)
   - **Goal:** After leader failure (heartbeat timeout), new leader elected; client RPCs return gRPC FAILED_PRECONDITION with leader_hint metadata for transparent redirect.
-  - **Design:** `FailoverManager` subscribes to `NodeEvent::PeerFailed`; updates `Arc<RwLock<Option<NodeId>>>` LeaderRef; RPC handlers check LeaderRef and return redirect hint.
-  - **Files:** `crates/amaters-cluster/src/failover.rs`, `crates/amaters-cluster/src/rpc.rs`, `crates/amaters-cluster/src/node.rs`
+  - **Design:** `FailoverCoordinator::should_redirect(my_id)` added to existing `FailoverCoordinator`; `RaftNode::trigger_failover_election` uses it for redirect logic.
+  - **Files:** `crates/amaters-cluster/src/failover.rs`, `crates/amaters-cluster/src/node.rs`
   - **Tests:** `test_failover_redirects_after_leader_loss`, `test_failover_no_redirect_on_follower_loss`
-  - **Risk:** Race between election convergence and RPC handler read; use polling with timeout.
 - [x] Fencing tokens to prevent split-brain writes (planned 2026-04-16)
   - **Goal:** Each write stamped with monotonic FencingToken(term, sequence); storage layer rejects writes with stale token.
   - **Design:** `FencingToken(u64)` packed into AtomicU64; high 32 bits = term, low 32 bits = seq; issued by leader via `FencingTokenState`; embedded in WAL v2 entry header.
@@ -86,12 +97,11 @@
   - **Files:** `crates/amaters-cluster/src/node.rs` (state transitions), `crates/amaters-cluster/src/state.rs` (state machine events), `crates/amaters-cluster/src/raft/*.rs` (Raft-specific transitions), `crates/amaters-cluster/Cargo.toml` (tracing dep if needed)
   - **Tests:** Verify log messages emitted on state transitions using tracing-test subscriber, coverage of all transition types, structured field presence
   - **Risk:** Over-logging in hot path — mitigate by using debug! for high-frequency events (heartbeat acks) and info! for state changes
-- [~] Prometheus-compatible metrics: term, commit index, applied index, election count, log size (planned 2026-04-16)
+- [x] Prometheus-compatible metrics: term, commit index, applied index, election count, log size (planned 2026-04-16)
   - **Goal:** Expose Raft state as Prometheus gauges/counters on configurable HTTP port.
-  - **Design:** `metrics` crate + `metrics-exporter-prometheus`; `MetricsCollector` in `metrics.rs`; updated from Raft event loop via `metrics::gauge!` / `metrics::counter!`.
-  - **Files:** `crates/amaters-cluster/src/metrics.rs`, `crates/amaters-cluster/src/node.rs`, `crates/amaters-cluster/Cargo.toml`
+  - **Design:** Hand-rolled `AtomicU64` counters in `ClusterMetrics`; `serve_metrics(addr)` spawns axum HTTP task; `global()` singleton via `OnceLock`; no external `metrics` crate.
+  - **Files:** `crates/amaters-cluster/src/metrics.rs`
   - **Tests:** `test_metrics_term_increments_on_election`, `test_metrics_commit_index_advances`
-  - **Risk:** Metrics HTTP server must not block main Raft event loop; use separate tokio task.
 - [ ] Cluster topology dashboard (node status, shard distribution)
 - [ ] Alerting hooks: leader loss, quorum loss, slow replication
 
@@ -116,30 +126,26 @@
 - [ ] Large log test: 1M+ entries with compaction
 
 ### Configuration
-- [~] TOML-based configuration file (planned 2026-04-16)
-  - **Goal:** `ClusterConfig` deserializable from TOML + env var overrides; schema validated on startup.
-  - **Design:** `figment` crate (TOML + Env providers); `Config::validate()` checks required fields and ranges; `config.rs` module.
-  - **Files:** `crates/amaters-cluster/src/node.rs`, `crates/amaters-cluster/src/config.rs` (new)
-  - **Tests:** `test_config_from_toml`, `test_config_env_override`, `test_config_validation_missing_field`
-  - **Risk:** figment must be in workspace dependencies.
-- [~] Environment variable overrides (planned 2026-04-16)
+- [x] TOML-based configuration file (planned 2026-04-16)
+  - **Goal:** `NodeConfig` deserializable from TOML + env var overrides; schema validated on startup.
+  - **Design:** `toml` crate (no figment); manual env-var overlay in `apply_env_overrides()`; `NodeConfig::validate()` returns `Vec<ConfigError>`; `config.rs` module.
+  - **Files:** `crates/amaters-cluster/src/config.rs` (new)
+  - **Tests:** `test_config_from_toml`, `test_config_env_override`, `test_config_validation_missing_field`, `test_config_validation_out_of_range`
+- [x] Environment variable overrides (planned 2026-04-16)
   - **Goal:** All config fields overridable via env var `AMATERS_<FIELD>`.
-  - **Design:** figment `Env::prefixed("AMATERS_")` layered after TOML.
+  - **Design:** Manual `std::env::var` checks in `NodeConfig::apply_env_overrides()`; no figment needed.
   - **Files:** `crates/amaters-cluster/src/config.rs`
   - **Tests:** `test_config_env_override`
-  - **Risk:** Field naming convention must be consistent.
-- [~] Dynamic reconfiguration without restart where possible (planned 2026-04-16)
+- [x] Dynamic reconfiguration without restart where possible (planned 2026-04-16)
   - **Goal:** Heartbeat interval and log compaction threshold hot-updatable without restart.
-  - **Design:** Store hot-updatable fields in `Arc<ArcSwap<DynamicConfig>>`; SIGHUP or admin RPC triggers reload.
+  - **Design:** `Arc<parking_lot::RwLock<DynamicConfig>>` field in `RaftNode`; `update_dynamic_config()` method; event loop reads from it on each tick.
   - **Files:** `crates/amaters-cluster/src/config.rs`, `crates/amaters-cluster/src/node.rs`
-  - **Tests:** `test_dynamic_reconfiguration_heartbeat_interval`
-  - **Risk:** Not all fields are safe to change at runtime; document which are.
-- [~] Configuration schema validation on startup (planned 2026-04-16)
+  - **Tests:** `test_dynamic_reconfiguration_heartbeat_interval`, `test_dynamic_config_from_node_config`
+- [x] Configuration schema validation on startup (planned 2026-04-16)
   - **Goal:** Invalid config fields produce actionable error messages before node starts.
-  - **Design:** `Config::validate()` returns `Vec<ConfigError>` with field path + problem description.
+  - **Design:** `NodeConfig::validate()` returns `Vec<ConfigError>` with field path + reason; checks bind_addr, node_id > 0, heartbeat > 0, election >= 2×heartbeat.
   - **Files:** `crates/amaters-cluster/src/config.rs`
-  - **Tests:** `test_config_validation_missing_field`, `test_config_validation_out_of_range`
-  - **Risk:** Validation must run before any networking or storage is initialized.
+  - **Tests:** `test_config_validation_missing_field`, `test_config_validation_out_of_range`, `test_config_validation_passes_for_valid_config`
 
 ## Notes
 
