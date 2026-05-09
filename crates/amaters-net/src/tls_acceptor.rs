@@ -84,12 +84,24 @@ impl<'a> TlsCredsRef<'a> {
 /// The private key is sniffed in PKCS#8 → RSA → EC order; the first format
 /// that parses successfully wins.  All cert chain entries are loaded.
 ///
+/// # Crypto provider
+///
+/// Rustls 0.23 requires a process-wide `CryptoProvider`.  This function
+/// installs the bundled `ring` provider on first call (`install_default`
+/// is a no-op once a provider has been set), so callers do not need to
+/// configure rustls themselves.  If the application has already installed
+/// a different provider, it is preserved.
+///
 /// # Errors
 ///
 /// Returns [`NetError::TlsError`] if the cert chain is empty or unparseable,
 /// the private key cannot be parsed in any supported format, or the rustls
 /// builder rejects the resulting key/cert pair (mismatched key type, etc.).
 pub fn build_rustls_config(creds: &TlsCredsRef<'_>) -> NetResult<ServerConfig> {
+    // Ensure a crypto provider is installed.  `install_default` returns Err
+    // if a provider is already present — we treat that as a no-op.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Parse certificate chain.
     let mut cert_reader = std::io::Cursor::new(creds.cert_pem);
     let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
@@ -234,10 +246,13 @@ mod tests {
     use tokio_rustls::TlsConnector;
 
     /// Generate a fresh self-signed cert pair as PEM bytes for testing.
+    ///
+    /// `SelfSignedGenerator::new` pre-populates the SAN list with `"localhost"`,
+    /// so we add `san` and `"127.0.0.1"` on top — the per-cert lookup helpers
+    /// (`cert_has_san`) match by membership rather than ordering.
     fn pem_pair_with_san(san: &str) -> (Vec<u8>, Vec<u8>) {
         let generator = SelfSignedGenerator::new(san)
             .with_san(san)
-            .with_san("localhost")
             .with_san("127.0.0.1");
         let (cert_der, key_der) = generator.generate().expect("generate cert");
 
@@ -269,7 +284,7 @@ mod tests {
     fn base64_encode(data: &[u8]) -> String {
         const ALPHABET: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
         let mut i = 0;
         while i + 3 <= data.len() {
             let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
@@ -309,20 +324,26 @@ mod tests {
             .with_no_client_auth()
     }
 
-    /// Extract the first SAN DNS name (or fall back to CN) from a peer
-    /// certificate as a UTF-8 string.  Used by the per-connection-cert tests
-    /// to assert which cert version was negotiated.
-    fn first_san_or_cn(der: &[u8]) -> String {
+    /// Return `true` if `der` is an X.509 cert that carries `expected` as a
+    /// SAN DNS name (case-sensitive, exact match).  Used by the per-connection
+    /// tests to assert which cert version was negotiated, regardless of the
+    /// order the `localhost` baseline SAN was inserted.
+    fn cert_has_san(der: &[u8], expected: &str) -> bool {
         use x509_parser::prelude::*;
-        let (_, cert) = X509Certificate::from_der(der).expect("parse x509");
+        let (_, cert) = match X509Certificate::from_der(der) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         if let Ok(Some(san_ext)) = cert.subject_alternative_name() {
-            if let Some(name) = san_ext.value.general_names.first() {
+            for name in &san_ext.value.general_names {
                 if let GeneralName::DNSName(s) = name {
-                    return s.to_string();
+                    if *s == expected {
+                        return true;
+                    }
                 }
             }
         }
-        cert.subject().to_string()
+        false
     }
 
     // -----------------------------------------------------------------------
@@ -358,7 +379,10 @@ mod tests {
     // LiveTlsAcceptor tests
     // -----------------------------------------------------------------------
 
-    /// Spawn an accept loop that echoes received bytes once back to the client.
+    /// Spawn an accept loop that echoes any bytes the client writes for the
+    /// lifetime of the connection — used by the per-connection-cert tests to
+    /// prove that an old TLS connection still does real I/O after the
+    /// server-side `ServerConfig` has been swapped for a different cert.
     async fn spawn_echo_acceptor(
         store: Arc<ArcSwap<ServerConfig>>,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -369,19 +393,25 @@ mod tests {
             loop {
                 match acceptor.accept().await {
                     Ok((mut tls, _peer)) => {
-                        // Echo a single request/response cycle in its own task.
                         tokio::spawn(async move {
-                            let mut buf = [0u8; 16];
-                            if let Ok(n) = tls.read(&mut buf).await {
-                                if n > 0 {
-                                    let _ = tls.write_all(&buf[..n]).await;
-                                    let _ = tls.flush().await;
+                            // Echo every chunk the client sends until EOF/error.
+                            // The held-connection test relies on this to prove
+                            // the original session is still alive after a
+                            // server-side cert swap.
+                            let mut buf = [0u8; 64];
+                            loop {
+                                match tls.read(&mut buf).await {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(n) => {
+                                        if tls.write_all(&buf[..n]).await.is_err() {
+                                            return;
+                                        }
+                                        if tls.flush().await.is_err() {
+                                            return;
+                                        }
+                                    }
                                 }
                             }
-                            // Hold the stream open until client closes — the
-                            // "old cert" test re-uses the same stream after
-                            // the server-side store has been swapped.
-                            let _ = tls.read(&mut buf).await;
                         });
                     }
                     Err(_) => return,
@@ -410,7 +440,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_tls_acceptor_serves_initial_cert() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let (cert, key) = pem_pair_with_san("v1.test");
         let creds = TlsCredsRef::new(&cert, &key);
         let cfg = build_rustls_config(&creds).expect("rustls cfg");
@@ -426,7 +455,10 @@ mod tests {
         let (_io, conn) = client.get_ref();
         let peer_certs = conn.peer_certificates().expect("peer certs");
         assert_eq!(peer_certs.len(), 1);
-        assert_eq!(first_san_or_cn(peer_certs[0].as_ref()), "v1.test");
+        assert!(
+            cert_has_san(peer_certs[0].as_ref(), "v1.test"),
+            "expected v1.test SAN in initial cert"
+        );
 
         drop(client);
         handle.abort();
@@ -434,7 +466,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_tls_acceptor_swap_changes_cert_for_new_connection() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let (cert_v1, key_v1) = pem_pair_with_san("v1.test");
         let (cert_v2, key_v2) = pem_pair_with_san("v2.test");
 
@@ -449,7 +480,10 @@ mod tests {
         a.read_exact(&mut buf).await.expect("read");
         let (_io, conn_a) = a.get_ref();
         let cert_a = conn_a.peer_certificates().expect("certs")[0].clone();
-        assert_eq!(first_san_or_cn(cert_a.as_ref()), "v1.test");
+        assert!(
+            cert_has_san(cert_a.as_ref(), "v1.test"),
+            "expected v1.test SAN before swap"
+        );
 
         // Swap to v2.
         let cfg_v2 = build_rustls_config(&TlsCredsRef::new(&cert_v2, &key_v2)).expect("v2");
@@ -463,7 +497,15 @@ mod tests {
         b.read_exact(&mut buf).await.expect("read");
         let (_io, conn_b) = b.get_ref();
         let cert_b = conn_b.peer_certificates().expect("certs")[0].clone();
-        assert_eq!(first_san_or_cn(cert_b.as_ref()), "v2.test");
+        assert!(
+            cert_has_san(cert_b.as_ref(), "v2.test"),
+            "expected v2.test SAN after swap"
+        );
+        // And the post-swap cert must NOT advertise v1.test.
+        assert!(
+            !cert_has_san(cert_b.as_ref(), "v1.test"),
+            "v2 cert should not advertise v1 SAN"
+        );
 
         drop(a);
         drop(b);
@@ -472,7 +514,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_tls_acceptor_existing_connection_continues_on_old_cert() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let (cert_v1, key_v1) = pem_pair_with_san("v1.test");
         let (cert_v2, key_v2) = pem_pair_with_san("v2.test");
 
@@ -489,7 +530,10 @@ mod tests {
         assert_eq!(&buf, b"hold");
         let (_io, conn_a) = client_a.get_ref();
         let cert_a = conn_a.peer_certificates().expect("certs")[0].clone();
-        assert_eq!(first_san_or_cn(cert_a.as_ref()), "v1.test");
+        assert!(
+            cert_has_san(cert_a.as_ref(), "v1.test"),
+            "expected v1.test SAN before swap"
+        );
 
         // Server-side: swap to v2.
         let cfg_v2 = build_rustls_config(&TlsCredsRef::new(&cert_v2, &key_v2)).expect("v2");
@@ -502,13 +546,41 @@ mod tests {
         assert_eq!(&buf, b"new!");
         let (_io, conn_b) = client_b.get_ref();
         let cert_b = conn_b.peer_certificates().expect("certs")[0].clone();
-        assert_eq!(first_san_or_cn(cert_b.as_ref()), "v2.test");
+        assert!(
+            cert_has_san(cert_b.as_ref(), "v2.test"),
+            "expected v2.test SAN on new connection"
+        );
 
-        // Client A's still-open stream is still on v1 — its cached cert is v1.
-        // Verify the held connection's negotiated peer cert remains v1.
+        // ── Liveness proof: do a SECOND request/response cycle through
+        // ── client A *after* the swap and after client B has done I/O.
+        // ── This is the real test: per-connection isolation means A's
+        // ── original session is still alive on its negotiated v1 cert.
+        let mut buf2 = [0u8; 5];
+        client_a
+            .write_all(b"alive")
+            .await
+            .expect("post-swap write through held v1 connection");
+        client_a
+            .read_exact(&mut buf2)
+            .await
+            .expect("post-swap read through held v1 connection");
+        assert_eq!(
+            &buf2, b"alive",
+            "held v1 connection must still echo through after server-side swap"
+        );
+
+        // Cached cert metadata must still match v1 (the negotiated identity
+        // never mutates inside a single session).
         let (_io, conn_a_after) = client_a.get_ref();
         let cert_a_after = conn_a_after.peer_certificates().expect("certs")[0].clone();
-        assert_eq!(first_san_or_cn(cert_a_after.as_ref()), "v1.test");
+        assert!(
+            cert_has_san(cert_a_after.as_ref(), "v1.test"),
+            "held connection should still report v1.test"
+        );
+        assert!(
+            !cert_has_san(cert_a_after.as_ref(), "v2.test"),
+            "held connection should not advertise v2 SAN"
+        );
 
         drop(client_a);
         drop(client_b);

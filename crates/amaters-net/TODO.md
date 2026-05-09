@@ -85,7 +85,7 @@
     - Compression is opt-in at both levels: feature flag (`compression = ["tonic/gzip"]`) gates `CompressionEncoding::Gzip` in the server builder, while the client additionally exposes a `CompressionConfig` in `AqlClientConfig` allowing per-client control independent of the feature flag.
     - `CompressionConfig::gzip()` constructor and `CompressionAlgorithm` enum provide a typed, builder-pattern API so callers never manipulate tonic internals directly.
     - A full round-trip integration test was not added (original plan item `test_compressed_round_trip_smaller_than_uncompressed`) as it requires a live gRPC server — deferred to the integration tests section.
-- [~] Throughput and latency benchmarks with criterion (planned 2026-05-08)
+- [x] Throughput and latency benchmarks with criterion (done 2026-05-08)
   - **Goal:** Criterion benchmarks against an in-process `AqlServiceImpl` + `MemoryStorage` measuring end-to-end gRPC throughput for SET/GET/DELETE/RANGE/BATCH at the gRPC layer. Bench-only.
   - **Design:** Extend existing `crates/amaters-net/benches/net_bench.rs` with a new `bench_grpc_ops` group. In-process server: spawn `AqlServiceImpl::new(MemoryStorage)` wrapped by `AqlServiceServer` via `tonic::transport::Server::serve_with_incoming` bound to a `TcpListener` on `127.0.0.1:0`; an `oneshot::Sender<SocketAddr>` hands the bound port back to the bench thread. `AqlClient::connect` builds a `tonic::transport::Channel`. Each bench measures one op type: SET (encrypt + Set query), GET (precomputed key), DELETE (insert + delete), RANGE (RangeQuery over a 1000-key prefix), BATCH (10 mixed ops in a transaction). Criterion's `Throughput::Elements(1)` for per-op latency.
   - **Files:** `crates/amaters-net/benches/net_bench.rs` (extend), `crates/amaters-net/Cargo.toml` (bench stanza already present)
@@ -107,19 +107,19 @@
 - [ ] Connection drop and reconnect
 
 ### Configuration
-- [~] TOML-based configuration file support (planned 2026-05-08)
+- [x] TOML-based configuration file support (done 2026-05-08)
   - **Goal:** Hot path of `AqlServerBuilder` (`bind_addr`, `tls_enabled`, cert paths, `metrics_addr`, logging verbosity, `slow_threshold_ms`, `rate_limit_qps`, `jwt_secret_path`, etc.) loadable from a TOML file. Builder methods remain as override knobs.
   - **Design:** New `crates/amaters-net/src/config.rs`. `pub struct NetConfig { ... }` with `#[derive(Deserialize)]` from `toml`. `impl NetConfig { pub fn from_path(path: impl AsRef<Path>) -> Result<Self, NetError>; pub fn apply_to<S>(&self, builder: AqlServerBuilder<S>) -> AqlServerBuilder<S>; }`. Sections: `[net]`, `[net.tls]`, `[net.metrics]`, `[net.logging]`, `[net.rate_limit]`, `[net.auth]`. Each maps to existing builder methods. Defaults match builder defaults — every field is `Option<T>` so a partial TOML doesn't override unset fields.
   - **Files:** `crates/amaters-net/src/config.rs` (new), `crates/amaters-net/src/lib.rs` (re-export `NetConfig`), `crates/amaters-net/Cargo.toml` (add `toml = { workspace = true }`)
   - **Tests:** `test_net_config_load_from_toml_file`, `test_net_config_partial_toml_uses_builder_defaults`, `test_net_config_apply_to_builder_overrides`, `test_net_config_invalid_toml_returns_error`, `test_net_config_full_round_trip`
   - **Risk:** Cert/key file paths are resolved relative to the TOML file's parent directory — documented in rustdoc.
-- [~] Environment variable overrides (planned 2026-05-08)
+- [x] Environment variable overrides (done 2026-05-08)
   - **Goal:** Layer `AMATERS_NET_*` env vars on top of `NetConfig::from_path`. Precedence: builder methods > env vars > TOML > defaults.
   - **Design:** Add `NetConfig::merge_env(self) -> Result<Self, NetError>` that overlays values from `AMATERS_NET_BIND_ADDR`, `AMATERS_NET_TLS_ENABLED`, `AMATERS_NET_TLS_CERT_PATH`, `AMATERS_NET_TLS_KEY_PATH`, `AMATERS_NET_METRICS_ADDR`, `AMATERS_NET_LOG_VERBOSITY`, `AMATERS_NET_SLOW_THRESHOLD_MS`, `AMATERS_NET_RATE_LIMIT_QPS`, `AMATERS_NET_JWT_SECRET_PATH`. Each var is parsed via `str::parse` into the appropriate `Option<T>`; parse errors return `NetError::InvalidRequest`. `NetConfig::load_layered(path) = from_path(path)?.merge_env()`.
   - **Files:** `crates/amaters-net/src/config.rs` (extend), `crates/amaters-net/src/lib.rs` (re-export `load_layered`), `crates/amaters-net/Cargo.toml` (add `serial_test = { workspace = true }` as dev-dep), `Cargo.toml` (add `serial_test = "3"` to workspace deps)
   - **Tests:** `test_env_override_bind_addr`, `test_env_override_tls_enabled_true`, `test_env_override_invalid_value_returns_error`, `test_env_does_not_override_when_unset`, `test_layered_load_combines_toml_and_env`. All use `#[serial]` and explicit env-var cleanup.
   - **Risk:** Tests that mutate process env vars must be serialized — use `serial_test::serial`.
-- [~] Hot reload of TLS certificates (planned 2026-05-08)
+- [x] Hot reload of TLS certificates (done 2026-05-08)
   - **Goal:** Per-connection TLS config swap. New connections after a cert rotation use the new cert. In-flight connections drain naturally on their old negotiated cert. Pure Rust (`tokio_rustls`); zero downtime.
   - **Design:** New `crates/amaters-net/src/tls_acceptor.rs` with `LiveTlsAcceptor { store: Arc<ArcSwap<rustls::ServerConfig>>, listener: TcpListener }`. Per-accept: `Arc::clone(&store.load())`, hand to `tokio_rustls::TlsAcceptor::from(...)`, await TLS handshake, yield as a stream into `Server::serve_with_incoming_shutdown`. `pub fn build_rustls_config(creds: &TlsCreds) -> Result<rustls::ServerConfig, NetError>` translates PEM bytes into a `rustls::ServerConfig`. `AqlServerBuilder::with_tls_creds(self, creds: TlsCreds) -> NetResult<Self>` builds initial store; `tls_config_store(&self) -> Option<Arc<ArcSwap<rustls::ServerConfig>>>` exposes for caller wiring. Cross-crate: `crates/amaters-server/src/hot_reload.rs` gains `swap_rustls_config(store, creds)` and `spawn_tls_reloader_with_rustls_store(...)` so the file-watcher updates both stores.
   - **Files:** `crates/amaters-net/src/tls_acceptor.rs` (new), `crates/amaters-net/src/server.rs` (modify; builder TLS API), `crates/amaters-net/src/lib.rs` (re-export `LiveTlsAcceptor`, `build_rustls_config`), `crates/amaters-server/src/hot_reload.rs` (modify; new helpers)
