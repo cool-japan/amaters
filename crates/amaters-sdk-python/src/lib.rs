@@ -33,6 +33,65 @@ use helpers::{convert_sdk_error, parse_batch_operations, python_to_key};
 use streaming::{PyBatchStreamIterator, PyStreamIterator};
 use types::{PyBatchResult, PyKey, PyScanResult, SendableQueryResult, query_result_to_sendable};
 
+/// Length of the saturated end-key sentinel used when a prefix has no
+/// representable lexicographic upper bound (i.e. is empty or contains
+/// only ``0xFF`` bytes).  256 ``0xFF`` bytes overshoots any practical
+/// key, so the half-open range ``[prefix, sentinel)`` returns every
+/// key matching the prefix.
+const SATURATED_END_KEY_LEN: usize = 256;
+
+/// Compute the lexicographically smallest key strictly greater than every
+/// key starting with ``prefix``.
+///
+/// The returned value, when used as the **exclusive** upper bound of a
+/// half-open range ``[prefix, end)``, captures exactly the set of keys
+/// whose first ``prefix.len()`` bytes equal ``prefix``.
+///
+/// # Algorithm
+///
+/// Walk the prefix bytes from right to left.  On the first byte that is
+/// not ``0xFF``, increment it by one and truncate the suffix.  If every
+/// byte is ``0xFF`` (or the prefix is empty), there is no representable
+/// upper bound, so return ``None``.  Callers should treat ``None`` as
+/// "open-ended" — typically by substituting a sufficiently large
+/// sentinel like [`saturated_end_key`].
+///
+/// # Examples
+///
+/// * ``b"abc"`` → ``Some(b"abd")``
+/// * ``b"ab\xff"`` → ``Some(b"ac")``  (trailing ``0xFF`` is truncated)
+/// * ``b"\xff\xff"`` → ``None``
+/// * ``b""`` → ``None``
+pub(crate) fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    loop {
+        // Copy the current trailing byte by value so the immutable borrow
+        // ends before we mutate ``end`` below.
+        let trailing = match end.last() {
+            Some(byte) => *byte,
+            None => return None,
+        };
+        if trailing == 0xFF {
+            end.pop();
+            continue;
+        }
+        // First non-0xFF byte from the right: increment it and truncate
+        // the (already-empty) suffix.
+        let last_index = end.len() - 1;
+        if let Some(slot) = end.get_mut(last_index) {
+            *slot = slot.saturating_add(1);
+        }
+        return Some(end);
+    }
+}
+
+/// Build a saturated end-key sentinel ([`SATURATED_END_KEY_LEN`] bytes
+/// of ``0xFF``) suitable for use as an open-ended upper bound when
+/// [`prefix_upper_bound`] returns ``None``.
+pub(crate) fn saturated_end_key() -> Vec<u8> {
+    vec![0xFF; SATURATED_END_KEY_LEN]
+}
+
 /// Python wrapper for AmateRS client
 #[pyclass(name = "AmateRSClient")]
 struct PyAmateRSClient {
@@ -570,6 +629,125 @@ impl PyAmateRSClient {
         let effective_chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
 
         future_into_py(py, async move {
+            let client = client.lock().await;
+            let results = client
+                .range(&collection, &start_key, &end_key)
+                .await
+                .map_err(convert_sdk_error)?;
+
+            let items: Vec<(Vec<u8>, Vec<u8>)> = results
+                .iter()
+                .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+                .collect();
+
+            Ok(PyStreamIterator {
+                items,
+                position: std::sync::atomic::AtomicUsize::new(0),
+                chunk_size: effective_chunk_size,
+            })
+        })
+    }
+
+    /// Prefix query - retrieve key-value pairs whose keys share a common prefix
+    ///
+    /// Equivalent to a range query whose lower bound is *prefix* and whose
+    /// upper bound is the lexicographically next key after every key with
+    /// that prefix.  Internally:
+    ///
+    /// * Computes ``start = prefix``
+    /// * Computes ``end = prefix_upper_bound(prefix)``; if the prefix is all
+    ///   ``0xFF`` (or empty) the upper bound is open and a 256-byte ``0xFF``
+    ///   sentinel is used so the underlying range engine returns every
+    ///   matching key.
+    ///
+    /// Args:
+    ///     collection (str): Collection name
+    ///     prefix (bytes or str): Key prefix
+    ///
+    /// Returns:
+    ///     list: List of ``(key_bytes, value_bytes)`` tuples whose keys
+    ///           start with *prefix*, ordered by key.
+    ///
+    /// Example:
+    ///     >>> rows = await client.prefix_query("users", b"user:")
+    ///     >>> for key, value in rows:
+    ///     ...     print(f"key={key!r}, value_len={len(value)}")
+    fn prefix_query<'py>(
+        &self,
+        py: Python<'py>,
+        collection: String,
+        prefix: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let prefix_key = python_to_key(prefix)?;
+        let client = self.client.clone();
+
+        future_into_py(py, async move {
+            let start_bytes = prefix_key.as_bytes().to_vec();
+            let end_bytes = match prefix_upper_bound(&start_bytes) {
+                Some(end) => end,
+                None => saturated_end_key(),
+            };
+
+            let start_key = Key::new(start_bytes);
+            let end_key = Key::new(end_bytes);
+
+            let client = client.lock().await;
+            let results = client
+                .range(&collection, &start_key, &end_key)
+                .await
+                .map_err(convert_sdk_error)?;
+
+            let pairs: Vec<(Vec<u8>, Vec<u8>)> = results
+                .iter()
+                .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+                .collect();
+            Ok(pairs)
+        })
+    }
+
+    /// Stream prefix-query results in chunks
+    ///
+    /// Streaming counterpart of :meth:`prefix_query`.  Returns a
+    /// :class:`StreamIterator` that yields chunks of
+    /// ``(key_bytes, value_bytes)`` tuples whose keys begin with *prefix*.
+    ///
+    /// Args:
+    ///     collection (str): Collection name
+    ///     prefix (bytes or str): Key prefix
+    ///     chunk_size (int, optional): Number of items per chunk (default: 100).
+    ///                                 Values ``<= 0`` are clamped to 1.
+    ///
+    /// Returns:
+    ///     StreamIterator: Iterator yielding chunks of matching pairs.
+    ///
+    /// Example:
+    ///     >>> stream = await client.prefix_stream("users", b"user:", chunk_size=50)
+    ///     >>> for chunk in stream:
+    ///     ...     for key, value in chunk:
+    ///     ...         process(key, value)
+    #[pyo3(signature = (collection, prefix, chunk_size=100))]
+    fn prefix_stream<'py>(
+        &self,
+        py: Python<'py>,
+        collection: String,
+        prefix: &Bound<'py, PyAny>,
+        chunk_size: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let prefix_key = python_to_key(prefix)?;
+        let client = self.client.clone();
+
+        let effective_chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
+
+        future_into_py(py, async move {
+            let start_bytes = prefix_key.as_bytes().to_vec();
+            let end_bytes = match prefix_upper_bound(&start_bytes) {
+                Some(end) => end,
+                None => saturated_end_key(),
+            };
+
+            let start_key = Key::new(start_bytes);
+            let end_key = Key::new(end_bytes);
+
             let client = client.lock().await;
             let results = client
                 .range(&collection, &start_key, &end_key)

@@ -1118,6 +1118,34 @@ impl AmateRSClient {
     }
 
     // -----------------------------------------------------------------------
+    // Transaction factory
+    // -----------------------------------------------------------------------
+
+    /// Begin a new transaction bound to `collection`.
+    ///
+    /// All operations are buffered locally until [`crate::Transaction::commit`] or
+    /// [`crate::Transaction::rollback`] is called.  Dropping the transaction without
+    /// committing or rolling back emits a `tracing::warn!` for every uncommitted
+    /// operation.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use amaters_sdk_rust::{AmateRSClient, Transaction};
+    /// use amaters_core::{Key, CipherBlob};
+    ///
+    /// # async fn example(client: AmateRSClient) -> anyhow::Result<()> {
+    /// let mut tx = client.transaction("users");
+    /// tx.set(Key::from_str("user:1"), CipherBlob::new(vec![1, 2, 3]))?;
+    /// tx.commit().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn transaction(&self, collection: impl Into<String>) -> crate::transaction::Transaction {
+        crate::transaction::Transaction::new(Arc::new(self.clone()), collection)
+    }
+
+    // -----------------------------------------------------------------------
     // Offline constructor (test / stub use only)
     // -----------------------------------------------------------------------
 

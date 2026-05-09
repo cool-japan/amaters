@@ -16,6 +16,7 @@ pub mod service;
 pub mod shutdown;
 pub mod tls_config;
 
+pub mod hot_reload;
 pub mod retry;
 
 // Re-export error types for convenience

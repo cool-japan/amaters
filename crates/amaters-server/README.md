@@ -294,6 +294,15 @@ spec:
 2. Check API key header name matches `api_key_header`
 3. For mTLS, verify CA cert and client cert chain
 
+## Documentation
+
+Long-form documentation lives under [`docs/`](docs/):
+
+- [Configuration Reference](docs/configuration-reference.md) — every TOML key with type, default, and validation rules.
+- [Operations Guide](docs/operations-guide.md) — signals, SIGHUP reload, TLS rotation, snapshots, log rotation, metrics endpoint.
+- [Deployment Guide](docs/deployment-guide.md) — systemd, Docker (scratch / distroless), Kubernetes, TLS preparation, mTLS, rate-limit tuning.
+- [Troubleshooting Guide](docs/troubleshooting-guide.md) — common errors, log inspection, metrics interpretation, snapshot recovery, mTLS debugging.
+
 ## License
 
 Licensed under Apache-2.0

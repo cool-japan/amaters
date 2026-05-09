@@ -26,11 +26,14 @@
 //! let index = node.propose(cmd)?;
 //! ```
 
+pub mod config;
 pub mod encryption;
 pub mod error;
 pub mod failover;
 pub mod heartbeat;
+pub mod key_rotation;
 pub mod log;
+pub mod merkle;
 pub mod metrics;
 pub mod node;
 pub mod persistence;
@@ -44,7 +47,9 @@ pub use encryption::{EncryptedPayload, EntryEncryptor, LogEncryptionKey, LogInte
 pub use error::{RaftError, RaftResult};
 pub use failover::{FailoverConfig, FailoverCoordinator, FailoverEvent};
 pub use heartbeat::FailureDetector;
+pub use key_rotation::{KeyManager, KeyVersion, LEGACY_KEY_VERSION};
 pub use log::{ApplyResult, Command, LogEntry, RaftLog, SnapshotData, StateMachine};
+pub use merkle::{MerkleProof, MerkleTree};
 pub use metrics::ClusterMetrics;
 pub use node::RaftNode;
 pub use persistence::{FilePersistence, MemoryPersistence, RaftPersistence};

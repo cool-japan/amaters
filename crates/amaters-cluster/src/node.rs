@@ -1,6 +1,8 @@
 //! Main Raft node implementation
 
+use crate::config::DynamicConfig;
 use crate::error::{RaftError, RaftResult};
+use crate::failover::{FailoverConfig, FailoverCoordinator};
 use crate::log::{Command, LogEntry, RaftLog};
 use crate::persistence::{FilePersistence, RaftPersistence};
 use crate::rpc::{
@@ -13,8 +15,8 @@ use crate::snapshot::{
 use crate::state::FencingTokenState;
 use crate::state::{CandidateState, LeaderState, PersistentState, VolatileState};
 use crate::types::{
-    ClusterConfig, ConfigState, FencingToken, LogIndex, MembershipChange, NodeId, NodeState,
-    RaftConfig, Term,
+    ClusterConfig, ConfigState, FencingToken, HeartbeatConfig, LogIndex, MembershipChange, NodeId,
+    NodeState, RaftConfig, Term,
 };
 use crate::wal::{CorruptionPolicy, WalReader};
 use parking_lot::RwLock;
@@ -54,6 +56,22 @@ pub struct RaftNode {
     fencing_token_state: Arc<FencingTokenState>,
     /// True while WAL replay is in progress; RPCs are rejected during this window
     is_recovering: Arc<AtomicBool>,
+    /// Hot-reloadable configuration subset.
+    ///
+    /// The Raft event loop reads `heartbeat_interval_ms` and
+    /// `compaction_threshold` from this value so that operator changes take
+    /// effect on the next tick without a full restart.
+    ///
+    /// Fields that require restart (bind_addr, node_id, peers, …) are NOT
+    /// present here; see [`crate::config::NodeConfig`] for documentation on
+    /// which fields fall into each category.
+    pub dynamic_config: Arc<RwLock<DynamicConfig>>,
+    /// Failover coordinator for leader failure detection and client redirects.
+    ///
+    /// Tracks which node is the current leader and detects leader failures via
+    /// heartbeat timeout.  The coordinator is seeded with the cluster peers
+    /// at construction time.
+    pub failover_coordinator: Arc<RwLock<FailoverCoordinator>>,
 }
 
 impl RaftNode {
@@ -134,6 +152,19 @@ impl RaftNode {
             config.peers.iter().map(|&id| (id, String::new())).collect();
         let config_state = ConfigState::new_stable(initial_members);
 
+        // Build failover coordinator seeded with all peers.
+        let hb_interval_ms = config.heartbeat_interval;
+        let failover_coordinator = {
+            let hb_cfg = HeartbeatConfig::new(hb_interval_ms, hb_interval_ms * 10, 3);
+            let mut coord =
+                FailoverCoordinator::new(hb_cfg, FailoverConfig::default(), config.node_id);
+            for &peer in config.peers.iter().filter(|&&p| p != config.node_id) {
+                // Ignore errors — new node may not be tracked yet
+                let _ = coord.track_peer(peer);
+            }
+            Arc::new(RwLock::new(coord))
+        };
+
         Ok(Self {
             config: Arc::new(config),
             persistent: Arc::new(RwLock::new(persistent_state)),
@@ -149,6 +180,11 @@ impl RaftNode {
             stepping_down: Arc::new(RwLock::new(false)),
             fencing_token_state: Arc::new(FencingTokenState::new()),
             is_recovering,
+            dynamic_config: Arc::new(RwLock::new(DynamicConfig {
+                heartbeat_interval_ms: hb_interval_ms,
+                compaction_threshold: 10_000,
+            })),
+            failover_coordinator,
         })
     }
 
@@ -214,6 +250,18 @@ impl RaftNode {
             config.peers.iter().map(|&id| (id, String::new())).collect();
         let config_state = ConfigState::new_stable(initial_members);
 
+        // Build failover coordinator seeded with all peers.
+        let hb_interval_ms_wp = config.heartbeat_interval;
+        let failover_coordinator_wp = {
+            let hb_cfg = HeartbeatConfig::new(hb_interval_ms_wp, hb_interval_ms_wp * 10, 3);
+            let mut coord =
+                FailoverCoordinator::new(hb_cfg, FailoverConfig::default(), config.node_id);
+            for &peer in config.peers.iter().filter(|&&p| p != config.node_id) {
+                let _ = coord.track_peer(peer);
+            }
+            Arc::new(RwLock::new(coord))
+        };
+
         Ok(Self {
             config: Arc::new(config),
             persistent: Arc::new(RwLock::new(ps)),
@@ -229,6 +277,11 @@ impl RaftNode {
             stepping_down: Arc::new(RwLock::new(false)),
             fencing_token_state: Arc::new(FencingTokenState::new()),
             is_recovering,
+            dynamic_config: Arc::new(RwLock::new(DynamicConfig {
+                heartbeat_interval_ms: hb_interval_ms_wp,
+                compaction_threshold: 10_000,
+            })),
+            failover_coordinator: failover_coordinator_wp,
         })
     }
 
@@ -359,6 +412,7 @@ impl RaftNode {
             volatile.become_follower(None);
             *self.leader_state.write() = None;
             *self.candidate_state.write() = None;
+            crate::metrics::global().set_current_term(persistent.current_term);
             debug!(
                 node_id = self.node_id(),
                 from_term = from_term,
@@ -460,6 +514,7 @@ impl RaftNode {
             volatile.become_follower(Some(req.leader_id));
             *self.leader_state.write() = None;
             *self.candidate_state.write() = None;
+            crate::metrics::global().set_current_term(persistent.current_term);
             debug!(
                 node_id = self.node_id(),
                 from_term = from_term,
@@ -485,6 +540,10 @@ impl RaftNode {
         *self.last_heartbeat.write() = Instant::now();
         volatile.become_follower(Some(req.leader_id));
         *self.candidate_state.write() = None;
+
+        // Inform the failover coordinator of the current leader so it can
+        // redirect clients and reset its election timer.
+        self.failover_coordinator.write().set_leader(req.leader_id);
 
         drop(persistent);
         drop(volatile);
@@ -557,6 +616,8 @@ impl RaftNode {
                     "Failed to update commit index"
                 );
             } else {
+                crate::metrics::global().set_commit_index(new_commit);
+                crate::metrics::global().set_log_entry_count(log.last_index());
                 debug!(
                     node_id = self.node_id(),
                     old_commit_index = old_commit,
@@ -595,6 +656,11 @@ impl RaftNode {
         let _span =
             tracing::info_span!("raft_election", node_id = self.node_id(), term = term).entered();
 
+        // Update metrics for the new election.
+        let metrics = crate::metrics::global();
+        metrics.set_current_term(term);
+        metrics.inc_elections_started();
+
         info!(
             node_id = self.node_id(),
             candidate_term = term,
@@ -631,6 +697,7 @@ impl RaftNode {
                 self.persist_state(persistent.current_term, persistent.voted_for);
                 volatile.become_follower(None);
                 *self.candidate_state.write() = None;
+                crate::metrics::global().set_current_term(persistent.current_term);
                 debug!(
                     node_id = self.node_id(),
                     from_term = from_term,
@@ -707,6 +774,14 @@ impl RaftNode {
 
         // Bump the packed fencing token to the new leader term (resets seq to 0).
         self.fencing_token_state.bump_term_token(term as u32);
+
+        // Tell the failover coordinator we are now the leader.
+        self.failover_coordinator.write().set_leader(self.node_id());
+
+        // Update metrics: term and leader change counter.
+        let metrics = crate::metrics::global();
+        metrics.set_current_term(term);
+        metrics.inc_leader_changes();
 
         info!(
             node_id = self.node_id(),
@@ -913,6 +988,7 @@ impl RaftNode {
             self.persist_state(persistent.current_term, persistent.voted_for);
             volatile.become_follower(None);
             *self.leader_state.write() = None;
+            crate::metrics::global().set_current_term(persistent.current_term);
             info!(
                 node_id = self.node_id(),
                 from_term = from_term,
@@ -958,6 +1034,8 @@ impl RaftNode {
                     if term == self.current_term() {
                         let old_commit = log.commit_index();
                         log.set_commit_index(new_commit)?;
+                        crate::metrics::global().set_commit_index(new_commit);
+                        crate::metrics::global().set_log_entry_count(log.last_index());
                         info!(
                             node_id = self.node_id(),
                             old_commit_index = old_commit,
@@ -1507,11 +1585,30 @@ impl RaftNode {
             .retain(|id, _| all_ids.contains(id) || *id == self.node_id());
     }
 
-    /// Check if election timeout has elapsed
+    /// Check if election timeout has elapsed.
+    ///
+    /// The effective timeout is computed from whichever is **larger**:
+    ///
+    /// - The static `RaftConfig::random_election_timeout()` from the initial
+    ///   node configuration, or
+    /// - `2 × dynamic_config.heartbeat_interval_ms`, the Raft-safe lower bound
+    ///   derived from the hot-reloadable heartbeat interval.
+    ///
+    /// This means that updating `DynamicConfig::heartbeat_interval_ms` at
+    /// runtime also extends (or contracts) the election timeout proportionally,
+    /// so the invariant `election_timeout ≥ 2 × heartbeat_interval` is always
+    /// maintained even after a hot-reload.
     pub fn election_timeout_elapsed(&self) -> bool {
         let last_heartbeat = *self.last_heartbeat.read();
-        let timeout = self.config.random_election_timeout();
-        last_heartbeat.elapsed() >= timeout
+        let static_timeout = self.config.random_election_timeout();
+        // Dynamic lower bound: 2 × current heartbeat interval.
+        let dynamic_min_ms = self
+            .dynamic_config
+            .read()
+            .heartbeat_interval_ms
+            .saturating_mul(2);
+        let effective_timeout = static_timeout.max(Duration::from_millis(dynamic_min_ms));
+        last_heartbeat.elapsed() >= effective_timeout
     }
 
     /// Reset election timer
@@ -1522,6 +1619,30 @@ impl RaftNode {
     /// Get a hint about the current leader (for client redirection)
     pub fn get_leader_hint(&self) -> Option<NodeId> {
         self.volatile.read().leader_id
+    }
+
+    /// Return a clone of the current dynamic configuration.
+    pub fn get_dynamic_config(&self) -> DynamicConfig {
+        self.dynamic_config.read().clone()
+    }
+
+    /// Hot-reload the dynamic configuration fields.
+    ///
+    /// This is the primary mechanism for applying operator changes (e.g. via
+    /// `SIGHUP` or an admin RPC) without restarting the node.  Only the fields
+    /// in [`DynamicConfig`] are updated; fields that require a full restart
+    /// (bind_addr, node_id, peers, …) cannot be changed here.
+    ///
+    /// The new values take effect on the **next Raft event-loop tick** —
+    /// typically within one `heartbeat_interval_ms`.
+    pub fn update_dynamic_config(&self, new_config: DynamicConfig) {
+        *self.dynamic_config.write() = new_config;
+        debug!(
+            node_id = self.node_id(),
+            heartbeat_interval_ms = self.dynamic_config.read().heartbeat_interval_ms,
+            compaction_threshold = self.dynamic_config.read().compaction_threshold,
+            "Dynamic configuration updated"
+        );
     }
 
     /// Trigger a failover election if this node is a follower.

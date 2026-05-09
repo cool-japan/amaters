@@ -119,8 +119,10 @@ pub mod connection;
 pub mod connection_manager;
 pub mod error;
 pub mod fhe;
+pub mod mock;
 pub mod query;
 pub mod streaming;
+pub mod transaction;
 
 // Re-export main types
 pub use cache::{CacheStats, InvalidationPolicy, QueryCache, QueryCacheConfig};
@@ -135,8 +137,10 @@ pub use connection_manager::{
 };
 pub use error::{Result, SdkError};
 pub use fhe::{FheEncryptor, FheKeys};
+pub use mock::{MockServerBuilder, MockServerHandle, MockStorage};
 pub use query::{FilterBuilder, FluentQueryBuilder, PredicateBuilder, query};
 pub use streaming::{QueryStream, Row, RowSender, StreamConfig, spawn_stub_producer};
+pub use transaction::Transaction;
 
 // Re-export core types for convenience
 pub use amaters_core::{CipherBlob, ColumnRef, Key, Predicate, Query, Update, col};

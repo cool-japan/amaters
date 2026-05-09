@@ -31,6 +31,9 @@ pub struct Config {
     /// Enable colored output
     #[serde(default = "default_true")]
     pub color: bool,
+    /// Default FHE key name used when no --key flag is provided
+    #[serde(default)]
+    pub default_key: Option<String>,
 }
 
 fn default_output_format() -> String {
@@ -63,6 +66,7 @@ impl Default for Config {
             tls: TlsConfig::default(),
             output_format: default_output_format(),
             color: true,
+            default_key: None,
         }
     }
 }
@@ -146,6 +150,32 @@ impl Config {
 
         std::fs::write(path, contents)
             .with_context(|| format!("Failed to write config file: {:?}", path))?;
+
+        Ok(())
+    }
+
+    /// Save configuration atomically: write to a `.tmp` file first, then rename.
+    ///
+    /// This prevents partial writes from corrupting the config file on crash or
+    /// concurrent access. The caller should pass the final (non-tmp) path; this
+    /// method derives the temporary path by appending `.tmp` to the file name.
+    pub fn save_atomic_to(&self, path: &Path) -> Result<()> {
+        let config_dir = path.parent().context("Invalid config path")?;
+
+        // Create config directory if it doesn't exist
+        std::fs::create_dir_all(config_dir)
+            .with_context(|| format!("Failed to create config directory: {:?}", config_dir))?;
+
+        let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
+
+        // Derive the temporary file path alongside the target.
+        let tmp_path = path.with_extension("toml.tmp");
+
+        std::fs::write(&tmp_path, &contents)
+            .with_context(|| format!("Failed to write temporary config file: {:?}", tmp_path))?;
+
+        std::fs::rename(&tmp_path, path)
+            .with_context(|| format!("Failed to rename {:?} -> {:?}", tmp_path, path))?;
 
         Ok(())
     }

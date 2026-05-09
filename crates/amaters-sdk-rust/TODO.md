@@ -67,11 +67,13 @@
   - **Files:** `crates/amaters-sdk-rust/src/streaming.rs` (new), `crates/amaters-sdk-rust/src/client.rs`
   - **Tests:** `test_stream_results`, `test_stream_backpressure`, `test_stream_cancellation`, `test_stream_config_timeout`, `test_stream_query_row_key_prefix`
   - **Note:** Producer is a local stub; replace with real tonic server-streaming RPC when the gRPC service is available.
-- [ ] Transactions (future)
-  - [ ] Begin transaction
-  - [ ] Commit
-  - [ ] Rollback
-- [~] Client-side caching (planned 2026-04-16)
+- [x] Transactions (`begin`/`commit`/`rollback`) (completed 2026-05-07)
+  - **Goal:** First-class `Transaction` type with begin/commit/rollback API, riding on `execute_batch` for atomicity.
+  - **Design:** New `src/transaction.rs`. `Transaction { ops: Vec<BatchOp>, client: Arc<AmaterClient>, committed: bool }`. `set/get/delete/update` queue to local buffer. `commit()` issues single `execute_batch` RPC. `rollback()` clears buffer locally (no RPC). `Drop` impl emits `tracing::warn!` if dropped uncommitted. Read inside tx: reverse-walk `ops` for last write to key (last-write-wins), fall through to server `get` for unknown keys.
+  - **Files:** `crates/amaters-sdk-rust/src/transaction.rs` (new), `crates/amaters-sdk-rust/src/client.rs` (add `transaction()` factory), `crates/amaters-sdk-rust/src/lib.rs` (re-export)
+  - **Tests:** `test_transaction_commit_applies_all_ops`, `test_transaction_rollback_no_server_roundtrip`, `test_transaction_drop_warns_uncommitted`, `test_transaction_read_sees_local_write_after_set`, `test_transaction_read_sees_delete_in_buffer_as_none`, `test_transaction_read_falls_through_to_server`, `test_transaction_double_commit_returns_error`, `test_transaction_commit_then_rollback_is_error`, `test_transaction_commit_failure_propagates_error`
+  - **Risk:** O(n) reverse-walk per buffered read; acceptable for typical tx size (<100 ops).
+- [x] Client-side caching (completed 2026-05-07)
   - **Goal:** Transparent LRU cache with TTL in `AmaterClient`; invalidated on put/delete.
   - **Design:** `moka::future::Cache<CacheKey, CachedValue>` with TTL policy; `CacheLayer` wraps inner client; `CacheKey = (namespace, key_bytes)`; `put`/`delete` call `cache.invalidate(&key)`.
   - **Files:** `crates/amaters-sdk-rust/src/cache.rs` (new), `crates/amaters-sdk-rust/src/client.rs`
@@ -84,14 +86,24 @@
 - [x] `examples/queries.rs`
 - [x] `examples/batch.rs`
 - [x] `examples/fhe_operations.rs`
-- [ ] `examples/healthcare.rs` (future)
-- [ ] `examples/financial.rs` (future)
+- [x] `examples/healthcare.rs` (completed 2026-05-07)
+  - **Goal:** Compileable example showing FHE-encrypted healthcare records: key generation, encrypted patient record (id, age, dna_marker), insertion, FHE-filter query (`age > 65`), decryption.
+  - **Design:** New `examples/healthcare.rs`. Self-contained main fn. Documents requirement: running `amaters-server` on localhost:50051 AND `--features fhe`. Graceful error when server absent.
+  - **Files:** `crates/amaters-sdk-rust/examples/healthcare.rs` (new)
+  - **Tests:** `cargo build --example healthcare --features fhe -p amaters-sdk-rust` (compile-only)
+  - **Risk:** `tfhe` is heavy at compile time; example is feature-gated — verify default-features CI does not include it.
+- [x] `examples/financial.rs` (completed 2026-05-07)
+  - **Goal:** Compileable example showing FHE-encrypted credit-scoring: encrypted income/debt/score, FHE filter (`income > 50000 AND debt < 10000`), paginated results, decryption.
+  - **Design:** Same shape as healthcare example. Emphasizes paginated FHE filter to showcase 0.2.0 cursor-based pagination.
+  - **Files:** `crates/amaters-sdk-rust/examples/financial.rs` (new)
+  - **Tests:** `cargo build --example financial --features fhe -p amaters-sdk-rust` (compile-only)
+  - **Risk:** Same as healthcare.rs.
 
 ## Phase 6: Testing ✅
 
 - [x] Unit tests (21 tests passing)
 - [x] Integration tests (15 tests, 11 passing, 4 ignored pending server)
-- [~] Mock server for tests (planned 2026-04-16)
+- [x] Mock server for tests (completed 2026-05-07)
   - **Goal:** In-process `MockAmaterServer` for tests; configurable responses per key; enables previously ignored integration tests.
   - **Design:** Hand-rolled `tower::Service` implementing proto service trait; `HashMap<Key, Value>` backend; spawned with `tokio::spawn` bound to random port in tests; `MockServerBuilder` for configuration.
   - **Files:** `crates/amaters-sdk-rust/src/mock.rs` (new), `crates/amaters-sdk-rust/tests/`
@@ -103,15 +115,20 @@
   - **Files:** `crates/amaters-sdk-rust/tests/property_tests.rs` (new)
   - **Tests:** `proptest_query_builder_roundtrip`, `proptest_error_display_not_empty`, `proptest_row_bytes_roundtrip`, `proptest_filter_builder_roundtrip`, `proptest_codec_roundtrip` (serialization feature only)
   - **Note:** `proptest_codec_roundtrip` is conditionally compiled under `#[cfg(feature = "serialization")]`.
-- [ ] Benchmarks
+- [x] Criterion benchmarks for client operations (completed 2026-05-07)
+  - **Goal:** Criterion benchmarks for SET/GET/DELETE/BATCH/RANGE/SCAN throughput against an in-process stub server. Bench-only; not part of `cargo test`.
+  - **Design:** New `benches/client_bench.rs` and `benches/stub_server.rs`. Stub server: minimal `tower::Service` over in-memory HashMap, spawned on `127.0.0.1:0`. Add `[[bench]] name = "client_bench" harness = false` to Cargo.toml. Workspace `criterion 0.8` already pinned. Each bench measures one op type via criterion's grouped/parameterized API.
+  - **Files:** `crates/amaters-sdk-rust/benches/client_bench.rs` (new), `crates/amaters-sdk-rust/benches/stub_server.rs` (new), `crates/amaters-sdk-rust/Cargo.toml`
+  - **Tests:** `cargo bench -p amaters-sdk-rust --no-run` (build-only smoke check)
+  - **Risk:** Stub server has no FHE/auth/streaming — bench file header documents this.
 
 ## Phase 7: Documentation 📋
 
 - [x] README
 - [x] API documentation (inline docs)
-- [ ] Tutorial
-- [ ] Cookbook
-- [ ] Migration guide
+- [x] Tutorial — `docs/tutorial.md` (2026-05-08).
+- [x] Cookbook — `docs/cookbook.md` (2026-05-08).
+- [x] Migration guide — `docs/migration.md` (2026-05-08).
 
 ## Dependencies ✅
 

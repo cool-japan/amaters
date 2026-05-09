@@ -1841,3 +1841,73 @@ fn test_fencing_token_default_none_in_messages() {
     let resp2 = AppendEntriesResponse::rejected(5);
     assert!(resp2.fencing_token.is_none());
 }
+
+/// Verify that updating `dynamic_config` takes effect immediately and that
+/// the heartbeat interval reflects the new value on the next read.
+#[test]
+fn test_dynamic_reconfiguration_heartbeat_interval() {
+    use crate::config::DynamicConfig;
+
+    let node = create_test_node(1);
+
+    // Check defaults set in RaftNode::new — derived from RaftConfig::heartbeat_interval
+    // which defaults to 50 ms.
+    let initial = node.get_dynamic_config();
+    assert_eq!(
+        initial.heartbeat_interval_ms, 50,
+        "default heartbeat_interval_ms should match RaftConfig default (50 ms)"
+    );
+    assert_eq!(
+        initial.compaction_threshold, 10_000,
+        "default compaction_threshold should be 10_000"
+    );
+
+    // Hot-reload with new values (e.g. triggered by SIGHUP)
+    let new_cfg = DynamicConfig {
+        heartbeat_interval_ms: 75,
+        compaction_threshold: 5_000,
+    };
+    node.update_dynamic_config(new_cfg);
+
+    let updated = node.get_dynamic_config();
+    assert_eq!(
+        updated.heartbeat_interval_ms, 75,
+        "heartbeat_interval_ms must be updated to 75"
+    );
+    assert_eq!(
+        updated.compaction_threshold, 5_000,
+        "compaction_threshold must be updated to 5_000"
+    );
+
+    // The Arc<RwLock<DynamicConfig>> is shared: a clone of the Arc must
+    // also see the updated values (simulates the event loop reading it).
+    let shared = Arc::clone(&node.dynamic_config);
+    let read_back = shared.read();
+    assert_eq!(
+        read_back.heartbeat_interval_ms, 75,
+        "shared Arc reader must see updated heartbeat_interval_ms"
+    );
+}
+
+/// Verifies that DynamicConfig values extracted from a NodeConfig match the
+/// source TOML fields.
+#[test]
+fn test_dynamic_config_from_node_config() {
+    use crate::config::NodeConfig;
+
+    let toml = r#"
+bind_addr = "0.0.0.0:7001"
+node_id = 1
+heartbeat_interval_ms = 100
+compaction_threshold = 8000
+"#;
+    let node_cfg = NodeConfig::from_toml(toml).expect("valid TOML");
+    let dyn_cfg = node_cfg.dynamic();
+
+    let node = create_test_node(1);
+    node.update_dynamic_config(dyn_cfg);
+
+    let got = node.get_dynamic_config();
+    assert_eq!(got.heartbeat_interval_ms, 100);
+    assert_eq!(got.compaction_threshold, 8000);
+}

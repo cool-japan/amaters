@@ -205,6 +205,7 @@ impl From<amaters_sdk_rust::SdkError> for AmateRSError {
             SdkError::Grpc(status) => Self::new(ErrorCode::OperationFailed, &status.to_string()),
             SdkError::Network(e) => Self::connection_error(&e.to_string()),
             SdkError::Other(msg) => Self::new(ErrorCode::Unknown, &msg),
+            SdkError::InvalidState(msg) => Self::new(ErrorCode::Internal, &msg),
         }
     }
 }

@@ -27,6 +27,7 @@ tracing-subscriber = { workspace = true }
 comfy-table = { workspace = true }
 indicatif = { workspace = true }
 chrono = { workspace = true }
+similar = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

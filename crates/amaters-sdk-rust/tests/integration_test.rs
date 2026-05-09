@@ -1,11 +1,9 @@
 //! Integration tests for AmateRS SDK
-//!
-//! Note: These tests currently run against stubs since we don't have
-//! a running server. When the server is implemented, these tests will
-//! need to be updated to connect to a test server.
 
 use amaters_core::{CipherBlob, Key, col};
-use amaters_sdk_rust::{AmateRSClient, ClientConfig, FheEncryptor, RetryConfig, SdkError, query};
+use amaters_sdk_rust::{
+    AmateRSClient, ClientConfig, FheEncryptor, MockServerBuilder, RetryConfig, SdkError, query,
+};
 use std::time::Duration;
 
 #[tokio::test]
@@ -180,13 +178,20 @@ async fn test_connection_pool_stats() {
     assert_eq!(stats.max_connections, 10);
 }
 
-// Tests that require a running server are skipped for now
+// ---------------------------------------------------------------------------
+// Tests that previously required a running server — now use MockServerBuilder
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-#[ignore = "requires running server"]
 async fn test_client_basic_operations() {
-    let client = AmateRSClient::connect("http://localhost:50051")
+    let mock = MockServerBuilder::new()
+        .start()
         .await
-        .expect("connect to server");
+        .expect("start mock server");
+
+    let client = AmateRSClient::connect(&mock.endpoint())
+        .await
+        .expect("connect to mock server");
 
     let collection = "test_collection";
     let key = Key::from_str("test_key");
@@ -218,34 +223,52 @@ async fn test_client_basic_operations() {
     // Verify deletion
     let retrieved = client.get(collection, &key).await.expect("get value");
     assert!(retrieved.is_none(), "value should not exist after delete");
+
+    mock.shutdown().await;
 }
 
 #[tokio::test]
-#[ignore = "requires running server"]
 async fn test_client_with_encryptor() {
+    let mock = MockServerBuilder::new()
+        .start()
+        .await
+        .expect("start mock server");
+
     let encryptor = FheEncryptor::new().expect("create encryptor");
-    let client = AmateRSClient::connect("http://localhost:50051")
+    let client = AmateRSClient::connect(&mock.endpoint())
         .await
         .expect("connect")
         .with_encryptor(encryptor);
 
     assert!(client.encryptor().is_some());
+
+    mock.shutdown().await;
 }
 
 #[tokio::test]
-#[ignore = "requires running server"]
 async fn test_client_health_check() {
-    let client = AmateRSClient::connect("http://localhost:50051")
+    let mock = MockServerBuilder::new()
+        .start()
+        .await
+        .expect("start mock server");
+
+    let client = AmateRSClient::connect(&mock.endpoint())
         .await
         .expect("connect");
 
     client.health_check().await.expect("health check");
+
+    mock.shutdown().await;
 }
 
 #[tokio::test]
-#[ignore = "requires running server"]
 async fn test_client_batch_operations() {
-    let client = AmateRSClient::connect("http://localhost:50051")
+    let mock = MockServerBuilder::new()
+        .start()
+        .await
+        .expect("start mock server");
+
+    let client = AmateRSClient::connect(&mock.endpoint())
         .await
         .expect("connect");
 
@@ -257,4 +280,6 @@ async fn test_client_batch_operations() {
 
     let results = client.execute_batch(queries).await.expect("execute batch");
     assert_eq!(results.len(), 3);
+
+    mock.shutdown().await;
 }

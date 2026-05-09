@@ -3,6 +3,7 @@
 //! Provides commands for generating, importing, exporting, and managing FHE keys.
 //! Keys are stored in `~/.amaters/keys/` directory.
 
+use crate::config::Config;
 use amaters_sdk_rust::FheKeys;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -257,6 +258,69 @@ impl KeyManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Default key management
+// ---------------------------------------------------------------------------
+
+/// Handle the `key default` subcommand.
+///
+/// Behaviour:
+/// - `name = Some(n)`: sets `config.default_key = Some(n)` and persists.
+/// - `clear = true`: unsets `config.default_key` and persists.
+/// - `show = true` (or no flags): prints the current default key.
+pub fn handle_key_default(
+    config: &mut Config,
+    config_path: &Path,
+    name: Option<String>,
+    clear: bool,
+    show: bool,
+) -> Result<()> {
+    if let Some(key_name) = name {
+        config.default_key = Some(key_name.clone());
+        config.save_atomic_to(config_path)?;
+        println!("Default key set to '{}'", key_name);
+    } else if clear {
+        config.default_key = None;
+        config.save_atomic_to(config_path)?;
+        println!("Default key cleared");
+    } else if show {
+        match &config.default_key {
+            Some(k) => println!("{}", k),
+            None => println!("(none)"),
+        }
+    } else {
+        // No flags: treat as implicit --show
+        match &config.default_key {
+            Some(k) => println!("{}", k),
+            None => println!("(none)"),
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the effective FHE key name.
+///
+/// Priority:
+/// 1. `explicit` — provided via `--key <name>` flag.
+/// 2. `config.default_key` — set via `key default <name>`.
+/// 3. Error — no key specified and no default configured.
+pub fn resolve_key_name(explicit: Option<&str>, config: &Config) -> Result<String> {
+    if let Some(name) = explicit {
+        return Ok(name.to_string());
+    }
+    if let Some(name) = &config.default_key {
+        return Ok(name.clone());
+    }
+    anyhow::bail!(
+        "No key specified and no default set. \
+         Use --key <name> or run 'key default <name>'."
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +380,146 @@ mod tests {
         assert_eq!(keys.len(), 0);
 
         fs::remove_dir_all(&temp_dir)?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 4: Default key tests
+    // -----------------------------------------------------------------------
+
+    fn make_temp_config(suffix: &str) -> (Config, std::path::PathBuf) {
+        let dir = env::temp_dir().join(format!("amaters_defkey_{}", suffix));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.toml");
+        let config = Config::default();
+        config.save_to(&path).expect("save default config");
+        (config, path)
+    }
+
+    #[test]
+    fn test_default_key_set_persists_to_config() -> Result<()> {
+        let (mut config, path) = make_temp_config("set_persists");
+
+        handle_key_default(&mut config, &path, Some("my-key".to_string()), false, false)?;
+
+        // Reload from disk and verify
+        let loaded = Config::load_from(&path)?;
+        assert_eq!(loaded.default_key, Some("my-key".to_string()));
+
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_key_clear_removes_setting() -> Result<()> {
+        let (mut config, path) = make_temp_config("clear_removes");
+
+        // First set a default key
+        handle_key_default(&mut config, &path, Some("my-key".to_string()), false, false)?;
+        let loaded = Config::load_from(&path)?;
+        assert_eq!(loaded.default_key, Some("my-key".to_string()));
+
+        // Now clear it
+        let mut config2 = loaded;
+        handle_key_default(&mut config2, &path, None, true, false)?;
+
+        let loaded2 = Config::load_from(&path)?;
+        assert_eq!(loaded2.default_key, None);
+
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_key_show_displays_current() -> Result<()> {
+        let (mut config, path) = make_temp_config("show_displays");
+        config.default_key = Some("visible-key".to_string());
+        config.save_to(&path)?;
+
+        // show=true should succeed without error
+        handle_key_default(&mut config, &path, None, false, true)?;
+
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_key_show_none_when_unset() -> Result<()> {
+        let (mut config, path) = make_temp_config("show_none");
+        // default_key is None by default
+
+        handle_key_default(&mut config, &path, None, false, true)?;
+
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_key_used_when_flag_absent() -> Result<()> {
+        let config = Config {
+            default_key: Some("default-fhe-key".to_string()),
+            ..Config::default()
+        };
+
+        let resolved = resolve_key_name(None, &config)?;
+        assert_eq!(resolved, "default-fhe-key");
+        Ok(())
+    }
+
+    #[test]
+    fn test_explicit_flag_overrides_default() -> Result<()> {
+        let config = Config {
+            default_key: Some("default-key".to_string()),
+            ..Config::default()
+        };
+
+        let resolved = resolve_key_name(Some("explicit-key"), &config)?;
+        assert_eq!(resolved, "explicit-key");
+        Ok(())
+    }
+
+    #[test]
+    fn test_no_default_no_flag_errors_helpfully() {
+        let config = Config::default(); // default_key is None
+        let result = resolve_key_name(None, &config);
+        assert!(result.is_err());
+        let msg = result.expect_err("should be error").to_string();
+        assert!(
+            msg.contains("No key specified"),
+            "Error message should mention 'No key specified', got: {msg}"
+        );
+        assert!(
+            msg.contains("key default"),
+            "Error message should hint about 'key default', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_default_key_atomic_write_no_partial_file() -> Result<()> {
+        let (mut config, path) = make_temp_config("atomic_write");
+
+        handle_key_default(
+            &mut config,
+            &path,
+            Some("atomic-key".to_string()),
+            false,
+            false,
+        )?;
+
+        // The .tmp file must be gone after successful write.
+        let tmp_path = path.with_extension("toml.tmp");
+        assert!(
+            !tmp_path.exists(),
+            ".tmp file should not exist after atomic write"
+        );
+
+        // The actual config file must exist and have the key.
+        assert!(path.exists(), "config file should exist");
+        let loaded = Config::load_from(&path)?;
+        assert_eq!(loaded.default_key, Some("atomic-key".to_string()));
+
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
         Ok(())
     }
 }

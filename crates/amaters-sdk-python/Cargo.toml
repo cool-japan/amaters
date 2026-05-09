@@ -45,5 +45,8 @@ default = []
 fhe = ["tfhe", "amaters-sdk-rust/fhe"]
 serialization = ["serde", "serde_json", "oxicode", "amaters-sdk-rust/serialization"]
 
+[package.metadata.maturin]
+python-source = "python"
+
 [lints]
 workspace = true

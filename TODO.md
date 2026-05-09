@@ -4,10 +4,10 @@ This is the master TODO file tracking the overall project development across all
 
 ## Project Status: Phases 1-5 Core Complete, Phase 7 SDKs In Progress
 
-**Current Version**: 0.2.0 (2026-04-26)
+**Current Version**: 0.2.1 (2026-05-09)
 **Target Version**: 1.0.0 (Production-Ready)
 **Estimated Timeline**: 12-18 months
-**Last Major Update**: 2026-04-26
+**Last Major Update**: 2026-05-09
 
 ---
 
@@ -255,7 +255,7 @@ Distributed consensus with Raft and consistent hashing partitioning.
 - [x] Performance test suite (25 performance tests) ✅
 - [x] Property-based tests (proptest for LSM-Tree invariants) ✅
 - [x] Cluster integration tests (election, replication, term advancement) ✅
-- [x] 1,852 tests passing workspace-wide (0 failures, 27 skipped) ✅
+- [x] 2,072 tests passing workspace-wide (0 failures, 24 skipped) ✅
 - [ ] Integration test suite (100+ cross-crate tests)
 - [ ] Chaos engineering tests
 - [ ] Production performance benchmarks
@@ -354,7 +354,7 @@ Distributed consensus with Raft and consistent hashing partitioning.
 - No FHE yet
 - Single-node only
 
-### v0.2.0 - Integration & Hardening ✅ (Current — 2026-04-26)
+### v0.2.0 - Integration & Hardening ✅ (2026-04-26)
 - [x] Full LSM-tree storage (WAL, WiscKey, bloom filters, compaction, block cache, secondary indexes, backup, GC)
 - [x] FHE compute pipeline (circuit building, optimization, execution planning, GPU detection)
 - [x] gRPC networking with mTLS, OCSP, connection pooling, load balancing, rate limiting
@@ -374,6 +374,14 @@ Distributed consensus with Raft and consistent hashing partitioning.
 - [x] 167 Rust source files, 78,963 Rust SLoC
 - [x] 0 todo!()/unimplemented!() stubs
 - [x] Edition 2024, rust-version = "1.85", Apache-2.0
+
+### v0.2.1 - Maintenance Release ✅ (Current — 2026-05-09)
+- [x] Fixed `doc_lazy_continuation` clippy lint in cluster key-retention config doc comment
+- [x] Fixed broken intra-doc links in `amaters-sdk-rust` and `amaters-sdk-typescript`
+- [x] Applied `cargo fmt` cleanup across server modules
+- [x] 2,072 tests passing (0 failures, 24 skipped)
+- [x] 186 Rust source files, 85,537 Rust SLoC
+- [x] 0 todo!()/unimplemented!() stubs
 
 ### v0.3.0 - Live FHE 📋 (Q2 2026)
 - [ ] TFHE live integration (actual encrypted computation, not just circuit structure)
@@ -420,15 +428,15 @@ splitrs --help
 
 No file currently exceeds 2000 lines (policy compliant).
 
-### Current Workspace Statistics (2026-04-26)
+### Current Workspace Statistics (2026-05-09)
 
 ```
 Total Crates: 9
-Rust Source Files: 167
-Rust SLoC: 78,963
+Rust Source Files: 186
+Rust SLoC: 85,537
 
 Test Status:
-- Total: 1,852 tests (0 failures, 27 skipped)
+- Total: 2,072 tests (0 failures, 24 skipped)
 - todo!()/unimplemented!() stubs: 0
 
 Estimated Cost (COCOMO): $2.47M
@@ -480,7 +488,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 
 ---
 
-**Last Updated**: 2026-04-26
+**Last Updated**: 2026-05-09
 **Project Lead**: COOLJAPAN OU (Team KitaSan)
 **Repository**: https://github.com/cool-japan/amaters
 **License**: Apache-2.0

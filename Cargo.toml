@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -24,10 +24,10 @@ documentation = "https://docs.rs/amaters"
 
 [workspace.dependencies]
 # Internal crates
-amaters-core = { path = "crates/amaters-core", version = "0.2.0" }
-amaters-net = { path = "crates/amaters-net", version = "0.2.0" }
-amaters-cluster = { path = "crates/amaters-cluster", version = "0.2.0" }
-amaters-sdk-rust = { path = "crates/amaters-sdk-rust", version = "0.2.0" }
+amaters-core = { path = "crates/amaters-core", version = "0.2.1" }
+amaters-net = { path = "crates/amaters-net", version = "0.2.1" }
+amaters-cluster = { path = "crates/amaters-cluster", version = "0.2.1" }
+amaters-sdk-rust = { path = "crates/amaters-sdk-rust", version = "0.2.1" }
 
 # FHE and Cryptography
 tfhe = { version = "1.5", default-features = false }
@@ -43,7 +43,7 @@ tokio-stream = "0.1"
 
 # Serialization
 rkyv = "0.8"
-oxicode = { version = "0.2", features = ["alloc", "serde"] }  # COOLJAPAN policy
+oxicode = { version = "0.2.3", features = ["alloc", "serde"] }  # COOLJAPAN policy
 
 # Networking
 tonic = { version = "0.14", features = ["gzip", "transport", "tls-ring", "tls-webpki-roots"] }
@@ -56,6 +56,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-layer = "0.3"
 tower-service = "0.3"
 http = "1.4"
+axum = "0.8"
 jsonwebtoken = { version = "9.3", features = ["use_pem"] }
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
@@ -118,6 +119,14 @@ quickcheck = "1.1"
 quickcheck_macros = "1.2"
 approx = "0.5"
 tracing-test = "0.2"
+serial_test = "3.2"
+
+# Hot reload and atomic pointer swap
+arc-swap = "1.9"
+notify = "8.2"   # Cross-platform filesystem notifications (pure Rust on Linux)
+
+# Diff
+similar = "3.1.0"
 
 # Benchmarking
 criterion = { version = "0.8", features = ["html_reports"] }

@@ -37,8 +37,14 @@ tower = { workspace = true }
 tower-layer = { workspace = true }
 tower-service = { workspace = true }
 http = { workspace = true }
+http-body = "1.0"
+axum = { workspace = true }
 jsonwebtoken = { workspace = true }
+oxicode = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+arc-swap = { workspace = true }
 
 # mTLS dependencies (feature-gated)
 rustls = { workspace = true, optional = true }
@@ -55,9 +61,12 @@ prost-build = "0.14"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-stream = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
-criterion = { workspace = true }
+tracing-test = { workspace = true }
+criterion = { workspace = true, features = ["async_tokio"] }
+serial_test = { workspace = true }
 
 [[bench]]
 name = "net_bench"

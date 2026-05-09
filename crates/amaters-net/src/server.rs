@@ -6,11 +6,14 @@
 use crate::convert::{cipher_blob_to_proto, create_version, key_to_proto, query_from_proto};
 use crate::error::{NetError, NetResult};
 use crate::proto::{aql, query};
+use crate::server_admin::{LogEntry, push_log_entry};
 use amaters_core::Query;
 use amaters_core::Update as UpdateOp;
 use amaters_core::traits::StorageEngine;
 use amaters_core::types::{CipherBlob, Key};
 use futures::StreamExt;
+use parking_lot::RwLock;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -28,6 +31,8 @@ pub struct AqlServiceImpl<S: StorageEngine> {
     storage: Arc<S>,
     /// Server start time for uptime calculation
     start_time: Instant,
+    /// Ring buffer for recent log entries (capacity: 256).
+    recent_log: Arc<RwLock<VecDeque<LogEntry>>>,
     /// FHE key manager for encrypted operations
     #[cfg(feature = "compute")]
     key_manager: Arc<KeyManager>,
@@ -40,6 +45,7 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
         Self {
             storage,
             start_time: Instant::now(),
+            recent_log: Arc::new(RwLock::new(VecDeque::new())),
             key_manager: Arc::new(KeyManager::new()),
         }
     }
@@ -50,6 +56,7 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
         Self {
             storage,
             start_time: Instant::now(),
+            recent_log: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
@@ -59,6 +66,7 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
         Self {
             storage,
             start_time: Instant::now(),
+            recent_log: Arc::new(RwLock::new(VecDeque::new())),
             key_manager,
         }
     }
@@ -121,7 +129,7 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
         let execution_time_ms = start_time.elapsed().as_millis() as u64;
 
         // Build response
-        match result {
+        let response = match result {
             Ok(query_result) => aql::QueryResponse {
                 response: Some(aql::query_response::Response::Result(query_result)),
                 request_id: request.request_id,
@@ -129,7 +137,11 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
             },
             Err(e) => {
                 error!("Query execution failed: {}", e);
-                aql::QueryResponse {
+                push_log_entry(
+                    &self.recent_log,
+                    format!("ExecuteQuery elapsed={}ms error={}", execution_time_ms, e),
+                );
+                return aql::QueryResponse {
                     response: Some(aql::query_response::Response::Error(
                         crate::proto::errors::ErrorResponse {
                             code: e.error_code() as i32,
@@ -141,9 +153,14 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
                     )),
                     request_id: request.request_id,
                     execution_time_ms,
-                }
+                };
             }
-        }
+        };
+        push_log_entry(
+            &self.recent_log,
+            format!("ExecuteQuery elapsed={}ms ok", execution_time_ms),
+        );
+        response
     }
 
     /// Execute a query and return the result
@@ -159,6 +176,31 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
                     "Executing GET query: collection={}, key={:?}",
                     collection, key
                 );
+
+                // Intercept __admin__:<command> keys and dispatch to built-in handlers.
+                // The CLI encodes admin commands as Get queries with a special key prefix so
+                // that the admin wire protocol works over the existing gRPC path without a
+                // dedicated RPC.  Keys that are not admin commands fall through to storage as
+                // normal.
+                let key_str = key.to_string_lossy();
+                if let Some(admin_cmd) = key_str.strip_prefix("__admin__:") {
+                    if let Some(json) = self.handle_admin_command(admin_cmd).await {
+                        let blob = CipherBlob::new(json.into_bytes());
+                        return Ok(query::QueryResult {
+                            result: Some(query::query_result::Result::Single(
+                                query::SingleResult {
+                                    value: Some(cipher_blob_to_proto(&blob)),
+                                },
+                            )),
+                        });
+                    }
+                    // Unrecognised admin command — return None so CLI falls back to mock data.
+                    return Ok(query::QueryResult {
+                        result: Some(query::query_result::Result::Single(query::SingleResult {
+                            value: None,
+                        })),
+                    });
+                }
 
                 let result = self.storage.get(&key).await?;
 
@@ -624,6 +666,13 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
                     // Rollback all completed write operations
                     self.rollback_operations(&rollback_ops).await;
                     let execution_time_ms = start_time.elapsed().as_millis() as u64;
+                    push_log_entry(
+                        &self.recent_log,
+                        format!(
+                            "ExecuteBatch elapsed={}ms error=parse_query_{}: {}",
+                            execution_time_ms, idx, e
+                        ),
+                    );
                     return aql::BatchResponse {
                         response: Some(aql::batch_response::Response::Error(
                             crate::proto::errors::ErrorResponse {
@@ -656,6 +705,13 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
                     // Rollback all completed write operations
                     self.rollback_operations(&rollback_ops).await;
                     let execution_time_ms = start_time.elapsed().as_millis() as u64;
+                    push_log_entry(
+                        &self.recent_log,
+                        format!(
+                            "ExecuteBatch elapsed={}ms error=query_{}: {}",
+                            execution_time_ms, idx, e
+                        ),
+                    );
                     return aql::BatchResponse {
                         response: Some(aql::batch_response::Response::Error(
                             crate::proto::errors::ErrorResponse {
@@ -678,6 +734,14 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
             "ExecuteBatch completed successfully: {} queries in {}ms",
             results.len(),
             execution_time_ms
+        );
+        push_log_entry(
+            &self.recent_log,
+            format!(
+                "ExecuteBatch elapsed={}ms queries={} ok",
+                execution_time_ms,
+                results.len()
+            ),
         );
 
         aql::BatchResponse {
@@ -891,6 +955,7 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
         use futures::StreamExt;
 
         let storage = self.storage.clone();
+        let recent_log = self.recent_log.clone();
         let request_id = request.request_id.clone();
 
         let stream = async_stream::stream! {
@@ -1025,11 +1090,19 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
                 sequence,
             });
 
+            let elapsed_ms = start_time.elapsed().as_millis() as u64;
             info!(
                 "ExecuteStream completed: {} items in {} chunks, {}ms",
                 total_count,
                 total_chunks,
-                start_time.elapsed().as_millis()
+                elapsed_ms
+            );
+            push_log_entry(
+                &recent_log,
+                format!(
+                    "ExecuteStream elapsed={}ms items={} chunks={} ok",
+                    elapsed_ms, total_count, total_chunks
+                ),
             );
         };
 
@@ -1043,6 +1116,7 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
         _request: aql::HealthCheckRequest,
     ) -> aql::HealthCheckResponse {
         debug!("HealthCheck request received");
+        push_log_entry(&self.recent_log, "HealthCheck ok".to_string());
 
         aql::HealthCheckResponse {
             status: aql::HealthStatus::HealthServing as i32,
@@ -1057,6 +1131,7 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
         _request: aql::ServerInfoRequest,
     ) -> aql::ServerInfoResponse {
         debug!("GetServerInfo request received");
+        push_log_entry(&self.recent_log, "GetServerInfo ok".to_string());
 
         let mut capabilities = vec![
             "query.get".to_string(),
@@ -1076,161 +1151,28 @@ impl<S: StorageEngine> AqlServiceImpl<S> {
             uptime_seconds: self.start_time.elapsed().as_secs(),
         }
     }
-}
 
-/// Server builder for creating AQL service instances
-pub struct AqlServerBuilder<S: StorageEngine> {
-    storage: Arc<S>,
-}
-
-impl<S: StorageEngine + Send + Sync + 'static> AqlServerBuilder<S> {
-    /// Create a new server builder with the given storage engine
-    pub fn new(storage: Arc<S>) -> Self {
-        Self { storage }
-    }
-
-    /// Build the service implementation
-    pub fn build(self) -> AqlServiceImpl<S> {
-        AqlServiceImpl::new(self.storage)
-    }
-
-    /// Build a tonic-ready gRPC service (wrapped in `AqlServiceServer`).
+    /// Handle a decoded admin command and return a JSON string if supported.
     ///
-    /// When the `compression` feature is enabled the server is configured to
-    /// accept and send gzip-compressed messages.
-    pub fn build_grpc_service(
-        self,
-    ) -> crate::proto::aql::aql_service_server::AqlServiceServer<
-        crate::grpc_service::AqlGrpcService<S>,
-    > {
-        use crate::grpc_service::AqlGrpcService;
-        use crate::proto::aql::aql_service_server::AqlServiceServer;
-
-        let service_impl = Arc::new(AqlServiceImpl::new(self.storage));
-        let grpc_service = AqlGrpcService::new(service_impl);
-
-        #[allow(unused_mut)]
-        let mut server = AqlServiceServer::new(grpc_service);
-
-        #[cfg(feature = "compression")]
-        {
-            server = server
-                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-                .send_compressed(tonic::codec::CompressionEncoding::Gzip);
-        }
-
-        server
+    /// Delegates to [`crate::server_admin::handle_admin_command`].  The
+    /// interceptor in `execute_query_internal` remains here; only the logic
+    /// moves to `admin.rs`.
+    async fn handle_admin_command(&self, cmd: &str) -> Option<String> {
+        crate::server_admin::handle_admin_command(
+            cmd,
+            self.start_time.elapsed().as_secs(),
+            &self.recent_log,
+            &self.storage,
+        )
+        .await
     }
 }
 
-/// Configuration for streaming query responses
-///
-/// Controls chunk size, maximum result count, and timeout for streaming queries.
-#[derive(Debug, Clone)]
-pub struct StreamConfig {
-    /// Number of items per chunk (default: 100)
-    pub chunk_size: usize,
-    /// Maximum total results to return (None = unlimited)
-    pub max_results: Option<usize>,
-    /// Timeout for the entire streaming operation
-    pub timeout: std::time::Duration,
-}
-
-impl Default for StreamConfig {
-    fn default() -> Self {
-        Self {
-            chunk_size: 100,
-            max_results: None,
-            timeout: std::time::Duration::from_secs(30),
-        }
-    }
-}
-
-impl StreamConfig {
-    /// Create a new StreamConfig with the given chunk size
-    pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
-        self.chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
-        self
-    }
-
-    /// Set the maximum number of results
-    pub fn with_max_results(mut self, max_results: usize) -> Self {
-        self.max_results = Some(max_results);
-        self
-    }
-
-    /// Set the timeout duration
-    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-}
-
-/// Represents an operation that can be rolled back
-///
-/// Stores the information needed to undo a write operation
-/// during batch transaction rollback.
-#[derive(Debug)]
-#[allow(clippy::enum_variant_names)]
-enum RollbackOp {
-    /// Undo a Set operation: restore the old value or delete the key
-    UndoSet {
-        key: Key,
-        /// The value that existed before the Set (None if key was new)
-        old_value: Option<CipherBlob>,
-    },
-    /// Undo a Delete operation: re-insert the deleted value
-    UndoDelete {
-        key: Key,
-        /// The value that existed before deletion
-        old_value: Option<CipherBlob>,
-    },
-    /// Undo an Update operation: restore all key-value pairs to pre-update state
-    UndoUpdate {
-        /// Snapshot of all key-value pairs before the update.
-        /// Keys with `None` values existed in the key list but had no value.
-        snapshots: Vec<(Key, Option<CipherBlob>)>,
-    },
-}
-
-/// Apply a single update operation to a value blob.
-///
-/// - `Set`: replaces the value entirely with the new blob.
-/// - `Add`: concatenates each byte of the update blob to the corresponding byte
-///   of the current value (wrapping on overflow). If the blobs are different
-///   lengths, the shorter one is zero-extended.
-/// - `Mul`: multiplies each byte of the current value with the corresponding
-///   byte of the update blob (wrapping on overflow). If the blobs are different
-///   lengths, the shorter one is one-extended for multiplication identity.
-fn apply_update_operation(current: &CipherBlob, op: &UpdateOp) -> CipherBlob {
-    match op {
-        UpdateOp::Set(_col, blob) => blob.clone(),
-        UpdateOp::Add(_col, blob) => {
-            let a = current.as_bytes();
-            let b = blob.as_bytes();
-            let len = a.len().max(b.len());
-            let mut result = Vec::with_capacity(len);
-            for i in 0..len {
-                let va = if i < a.len() { a[i] } else { 0 };
-                let vb = if i < b.len() { b[i] } else { 0 };
-                result.push(va.wrapping_add(vb));
-            }
-            CipherBlob::new(result)
-        }
-        UpdateOp::Mul(_col, blob) => {
-            let a = current.as_bytes();
-            let b = blob.as_bytes();
-            let len = a.len().max(b.len());
-            let mut result = Vec::with_capacity(len);
-            for i in 0..len {
-                let va = if i < a.len() { a[i] } else { 1 };
-                let vb = if i < b.len() { b[i] } else { 1 };
-                result.push(va.wrapping_mul(vb));
-            }
-            CipherBlob::new(result)
-        }
-    }
-}
+// `AqlServerBuilder` lives in `crate::server_builder`; re-export so existing
+// callers can continue to write `crate::server::AqlServerBuilder`.
+pub use crate::server_builder::AqlServerBuilder;
+pub use crate::server_types::StreamConfig;
+use crate::server_types::{RollbackOp, apply_update_operation};
 
 #[cfg(test)]
 mod tests {
