@@ -1,9 +1,9 @@
 # AmateRS - The Sovereign Data Infrastructure
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.0-green.svg)](https://github.com/cool-japan/amaters)
+[![Version](https://img.shields.io/badge/version-0.2.1-green.svg)](https://github.com/cool-japan/amaters)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-1852%20passing-brightgreen.svg)](https://github.com/cool-japan/amaters)
+[![Tests](https://img.shields.io/badge/tests-2072%20passing-brightgreen.svg)](https://github.com/cool-japan/amaters)
 
 **AmateRS** is a next-generation distributed database with Fully Homomorphic Encryption (FHE) capabilities, enabling computation on encrypted data without ever exposing plaintext to servers.
 
@@ -91,14 +91,14 @@ AmateRS consists of four core components inspired by Japanese mythology:
 
 | Crate | Status | Tests | Public API Items | Description |
 |-------|--------|-------|------------------|-------------|
-| amaters-core | Alpha | 412 | 609 | FHE types, LSM-tree storage, WAL, SSTable, compaction, bloom filters, block cache, secondary index, backup, value log GC, circuits, optimizer, planner, GPU detection |
-| amaters-net | Alpha | 252 | 358 | gRPC (tonic), mTLS, OCSP, TLS crypto, connection pooling, load balancing, rate limiting, AQL query server |
-| amaters-cluster | Alpha | 151 | 245 | Raft consensus, log replication, state machine, snapshotting, consistent hashing, partitioning |
-| amaters-server | Alpha | 420 | 311 | Database server, JWT auth (HS/RS/ES/EdDSA), middleware, metrics, health HTTP endpoints, query cache, graceful shutdown, config |
-| amaters-sdk-rust | Alpha | 112 | 164 | Rust client SDK, connection management, caching, pagination, sorting |
-| amaters-sdk-typescript | Alpha | 84 | 189 | TypeScript/WASM SDK, gRPC + native HTTP transport |
+| amaters-core | Alpha | 429 | 609 | FHE types, LSM-tree storage, WAL, SSTable, compaction, bloom filters, block cache, secondary index, backup, value log GC, circuits, optimizer, planner, GPU detection |
+| amaters-net | Alpha | 311 | 358 | gRPC (tonic), mTLS, OCSP, TLS crypto, connection pooling, load balancing, rate limiting, AQL query server |
+| amaters-cluster | Alpha | 291 | 245 | Raft consensus, log replication, state machine, snapshotting, consistent hashing, partitioning |
+| amaters-server | Alpha | 429 | 311 | Database server, JWT auth (HS/RS/ES/EdDSA), middleware, metrics, health HTTP endpoints, query cache, graceful shutdown, config |
+| amaters-sdk-rust | Alpha | 149 | 164 | Rust client SDK, connection management, caching, pagination, sorting |
+| amaters-sdk-typescript | Alpha | 91 | 189 | TypeScript/WASM SDK, gRPC + native HTTP transport |
 | amaters-sdk-python | Alpha | — | PyO3 | Python bindings via PyO3/maturin |
-| amaters-cli | Alpha | 223 | 87 | CLI tool, REPL with history/multi-line/bang expansion, admin commands, shell completions, config management |
+| amaters-cli | Alpha | 269 | 87 | CLI tool, REPL with history/multi-line/bang expansion, admin commands, shell completions, config management |
 | amaters | Alpha | 30 | re-exports | Facade crate re-exporting workspace |
 
 ## Quick Start
@@ -120,8 +120,8 @@ Add as a dependency in `Cargo.toml`:
 
 ```toml
 [dependencies]
-amaters = "0.2.0"
-amaters-sdk-rust = "0.2.0"
+amaters = "0.2.1"
+amaters-sdk-rust = "0.2.1"
 ```
 
 ### Running the Server
@@ -216,13 +216,13 @@ amaters/
 
 ## Development Status
 
-**Current Version**: 0.2.0 (2026-04-26)
+**Current Version**: 0.2.1 (2026-05-09)
 **Edition**: 2024
 **rust-version**: 1.85
 **License**: Apache-2.0
 
-- 9 crates, 167 Rust source files, 78,963 Rust SLoC
-- 1,852 tests passing, 0 failures, 27 skipped
+- 9 crates, 186 Rust source files, 85,537 Rust SLoC
+- 2,072 tests passing, 0 failures, 24 skipped
 - 0 `todo!()`/`unimplemented!()` stubs
 - Estimated development cost: $2.47M (COCOMO)
 
