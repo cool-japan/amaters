@@ -84,3 +84,5 @@ dmypy.json
 # maturin / PyO3 build artifacts
 **/*.pyi.bak
 _maturin/
+
+target
