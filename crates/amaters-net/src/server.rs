@@ -3,10 +3,10 @@
 //! This module provides the server implementation that connects the network layer
 //! with the storage engine to handle client requests.
 
-use crate::server_admin::{push_log_entry, LogEntry};
 use crate::convert::{cipher_blob_to_proto, create_version, key_to_proto, query_from_proto};
 use crate::error::{NetError, NetResult};
 use crate::proto::{aql, query};
+use crate::server_admin::{LogEntry, push_log_entry};
 use amaters_core::Query;
 use amaters_core::Update as UpdateOp;
 use amaters_core::traits::StorageEngine;

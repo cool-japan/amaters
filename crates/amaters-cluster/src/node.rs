@@ -156,7 +156,8 @@ impl RaftNode {
         let hb_interval_ms = config.heartbeat_interval;
         let failover_coordinator = {
             let hb_cfg = HeartbeatConfig::new(hb_interval_ms, hb_interval_ms * 10, 3);
-            let mut coord = FailoverCoordinator::new(hb_cfg, FailoverConfig::default(), config.node_id);
+            let mut coord =
+                FailoverCoordinator::new(hb_cfg, FailoverConfig::default(), config.node_id);
             for &peer in config.peers.iter().filter(|&&p| p != config.node_id) {
                 // Ignore errors — new node may not be tracked yet
                 let _ = coord.track_peer(peer);
@@ -253,7 +254,8 @@ impl RaftNode {
         let hb_interval_ms_wp = config.heartbeat_interval;
         let failover_coordinator_wp = {
             let hb_cfg = HeartbeatConfig::new(hb_interval_ms_wp, hb_interval_ms_wp * 10, 3);
-            let mut coord = FailoverCoordinator::new(hb_cfg, FailoverConfig::default(), config.node_id);
+            let mut coord =
+                FailoverCoordinator::new(hb_cfg, FailoverConfig::default(), config.node_id);
             for &peer in config.peers.iter().filter(|&&p| p != config.node_id) {
                 let _ = coord.track_peer(peer);
             }
@@ -1600,7 +1602,11 @@ impl RaftNode {
         let last_heartbeat = *self.last_heartbeat.read();
         let static_timeout = self.config.random_election_timeout();
         // Dynamic lower bound: 2 × current heartbeat interval.
-        let dynamic_min_ms = self.dynamic_config.read().heartbeat_interval_ms.saturating_mul(2);
+        let dynamic_min_ms = self
+            .dynamic_config
+            .read()
+            .heartbeat_interval_ms
+            .saturating_mul(2);
         let effective_timeout = static_timeout.max(Duration::from_millis(dynamic_min_ms));
         last_heartbeat.elapsed() >= effective_timeout
     }

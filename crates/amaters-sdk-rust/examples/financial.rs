@@ -131,19 +131,72 @@ async fn main() -> anyhow::Result<()> {
     // Step 3: Insert 10 credit profiles
     // --------------------------------------------------------------------------
     let profiles = vec![
-        CreditProfile { applicant_id: 3001, annual_income: 85_000, total_debt:  6_000, credit_score: 720 },
-        CreditProfile { applicant_id: 3002, annual_income: 42_000, total_debt: 18_000, credit_score: 640 },
-        CreditProfile { applicant_id: 3003, annual_income: 130_000, total_debt:  3_000, credit_score: 790 },
-        CreditProfile { applicant_id: 3004, annual_income: 55_000, total_debt:  9_500, credit_score: 700 },
-        CreditProfile { applicant_id: 3005, annual_income: 31_000, total_debt: 25_000, credit_score: 580 },
-        CreditProfile { applicant_id: 3006, annual_income: 72_000, total_debt:  7_800, credit_score: 740 },
-        CreditProfile { applicant_id: 3007, annual_income: 48_000, total_debt: 11_200, credit_score: 665 },
-        CreditProfile { applicant_id: 3008, annual_income: 95_000, total_debt:  4_200, credit_score: 760 },
-        CreditProfile { applicant_id: 3009, annual_income: 29_000, total_debt: 30_000, credit_score: 520 },
-        CreditProfile { applicant_id: 3010, annual_income: 61_000, total_debt:  8_400, credit_score: 710 },
+        CreditProfile {
+            applicant_id: 3001,
+            annual_income: 85_000,
+            total_debt: 6_000,
+            credit_score: 720,
+        },
+        CreditProfile {
+            applicant_id: 3002,
+            annual_income: 42_000,
+            total_debt: 18_000,
+            credit_score: 640,
+        },
+        CreditProfile {
+            applicant_id: 3003,
+            annual_income: 130_000,
+            total_debt: 3_000,
+            credit_score: 790,
+        },
+        CreditProfile {
+            applicant_id: 3004,
+            annual_income: 55_000,
+            total_debt: 9_500,
+            credit_score: 700,
+        },
+        CreditProfile {
+            applicant_id: 3005,
+            annual_income: 31_000,
+            total_debt: 25_000,
+            credit_score: 580,
+        },
+        CreditProfile {
+            applicant_id: 3006,
+            annual_income: 72_000,
+            total_debt: 7_800,
+            credit_score: 740,
+        },
+        CreditProfile {
+            applicant_id: 3007,
+            annual_income: 48_000,
+            total_debt: 11_200,
+            credit_score: 665,
+        },
+        CreditProfile {
+            applicant_id: 3008,
+            annual_income: 95_000,
+            total_debt: 4_200,
+            credit_score: 760,
+        },
+        CreditProfile {
+            applicant_id: 3009,
+            annual_income: 29_000,
+            total_debt: 30_000,
+            credit_score: 520,
+        },
+        CreditProfile {
+            applicant_id: 3010,
+            annual_income: 61_000,
+            total_debt: 8_400,
+            credit_score: 710,
+        },
     ];
 
-    println!("Step 3: Encrypting and inserting {} credit profiles ...", profiles.len());
+    println!(
+        "Step 3: Encrypting and inserting {} credit profiles ...",
+        profiles.len()
+    );
 
     for profile in &profiles {
         let key = Key::from_str(&format!("applicant:{}", profile.applicant_id));
@@ -276,8 +329,18 @@ fn demo_local_encrypt_decrypt(encryptor: &FheEncryptor) -> anyhow::Result<()> {
     println!("--- Local FHE Demo (no server) ---\n");
 
     let profiles = vec![
-        CreditProfile { applicant_id: 9001, annual_income: 60_000, total_debt: 5_000, credit_score: 750 },
-        CreditProfile { applicant_id: 9002, annual_income: 40_000, total_debt: 15_000, credit_score: 620 },
+        CreditProfile {
+            applicant_id: 9001,
+            annual_income: 60_000,
+            total_debt: 5_000,
+            credit_score: 750,
+        },
+        CreditProfile {
+            applicant_id: 9002,
+            annual_income: 40_000,
+            total_debt: 15_000,
+            credit_score: 620,
+        },
     ];
 
     for p in &profiles {

@@ -156,7 +156,7 @@ pub(crate) fn validate_stream_args(
 /// Stream a query against an AmateRS server, emitting key-value chunks via
 /// JavaScript callbacks for async-iterator consumption from TypeScript.
 ///
-/// The TypeScript wrapper [`streamQuery`] adapts these callbacks into an
+/// The TypeScript wrapper `streamQuery` adapts these callbacks into an
 /// `AsyncIterableIterator<KeyValuePair>` using a queue + Promise-pull state
 /// machine; see `crates/amaters-sdk-typescript/src/ts/index.ts`.
 ///
@@ -247,21 +247,19 @@ mod tests {
     fn test_query_export_exists() {
         // Verify the async function signature compiles and can be named without
         // actually driving the future (no async executor available in native tests).
-        let _fut = wasm_query(
-            "http://localhost:50051".into(),
-            "users".into(),
-            "{}".into(),
-        );
+        let _fut = wasm_query("http://localhost:50051".into(), "users".into(), "{}".into());
     }
 
     #[test]
     fn test_validate_stream_args_accepts_valid_inputs() {
-        assert!(validate_stream_args(
-            "http://localhost:50051",
-            "users",
-            "{\"type\":\"get\",\"key\":\"foo\"}",
-        )
-        .is_ok());
+        assert!(
+            validate_stream_args(
+                "http://localhost:50051",
+                "users",
+                "{\"type\":\"get\",\"key\":\"foo\"}",
+            )
+            .is_ok()
+        );
         // Plain JSON values are accepted (string, number, bool) — only requires parseable JSON.
         assert!(validate_stream_args("http://x", "c", "null").is_ok());
         assert!(validate_stream_args("http://x", "c", "[]").is_ok());

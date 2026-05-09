@@ -252,7 +252,8 @@ impl NetConfig {
             self.net.tls.key_path = Some(PathBuf::from(val));
         }
         if let Some(val) = read_env("AMATERS_NET_METRICS_ADDR")? {
-            self.net.metrics.addr = Some(parse_env::<SocketAddr>("AMATERS_NET_METRICS_ADDR", &val)?);
+            self.net.metrics.addr =
+                Some(parse_env::<SocketAddr>("AMATERS_NET_METRICS_ADDR", &val)?);
         }
         if let Some(val) = read_env("AMATERS_NET_LOG_VERBOSITY")? {
             self.net.logging.verbosity = Some(LogVerbosityWire::parse(&val)?);
@@ -347,9 +348,8 @@ fn parse_env<T: std::str::FromStr>(name: &str, raw: &str) -> NetResult<T>
 where
     T::Err: std::fmt::Display,
 {
-    raw.parse::<T>().map_err(|e| {
-        NetError::InvalidRequest(format!("Invalid {name}={raw:?}: {e}"))
-    })
+    raw.parse::<T>()
+        .map_err(|e| NetError::InvalidRequest(format!("Invalid {name}={raw:?}: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +366,10 @@ mod tests {
     /// Generate a unique scratch path under `temp_dir()` for a TOML config.
     fn scratch_path(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("amaters_net_config_test_{name}_{}.toml", uuid::Uuid::new_v4()));
+        p.push(format!(
+            "amaters_net_config_test_{name}_{}.toml",
+            uuid::Uuid::new_v4()
+        ));
         p
     }
 
@@ -525,8 +528,7 @@ qps = 250.0
     #[test]
     fn test_net_config_invalid_toml_returns_error() {
         let path = scratch_path("invalid");
-        std::fs::write(&path, "this is not [net.tls valid toml = yes")
-            .expect("write toml");
+        std::fs::write(&path, "this is not [net.tls valid toml = yes").expect("write toml");
 
         let result = NetConfig::from_path(&path);
         assert!(matches!(result, Err(NetError::InvalidRequest(_))));
@@ -610,9 +612,7 @@ verbosity = "loud"
         // SAFETY: tests are serialized; only sets a well-known env var.
         unsafe { std::env::set_var("AMATERS_NET_BIND_ADDR", "127.0.0.1:60001") };
 
-        let cfg = NetConfig::default()
-            .merge_env()
-            .expect("merge_env");
+        let cfg = NetConfig::default().merge_env().expect("merge_env");
 
         assert_eq!(
             cfg.net.bind_addr,

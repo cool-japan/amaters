@@ -294,7 +294,7 @@ impl MockServerHandle {
         self.addr
     }
 
-    /// Returns a `http://` URI string suitable for [`AmateRSClient::connect`].
+    /// Returns a `http://` URI string suitable for [`crate::AmateRSClient::connect`].
     pub fn endpoint(&self) -> String {
         format!("http://{}", self.addr)
     }
@@ -454,10 +454,7 @@ mod tests {
     async fn test_mock_storage_unaffected_key_works() -> CoreResult<()> {
         let storage = MockStorage::new();
 
-        storage.inject_error(
-            "bad",
-            AmateRSError::IoError(ErrorContext::new("fail")),
-        );
+        storage.inject_error("bad", AmateRSError::IoError(ErrorContext::new("fail")));
 
         let good_key = Key::from_str("good");
         let value = CipherBlob::new(vec![1]);
@@ -521,11 +518,10 @@ mod tests {
         let addr = handle.addr();
         handle.shutdown().await;
         // Trying to connect should now fail because the port is closed.
-        let result =
-            tokio::time::timeout(std::time::Duration::from_millis(200), async {
-                tokio::net::TcpStream::connect(addr).await
-            })
-            .await;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            tokio::net::TcpStream::connect(addr).await
+        })
+        .await;
         // Either a timeout or a connect error is acceptable.
         let connected = result.map(|r| r.is_ok()).unwrap_or(false);
         assert!(!connected, "server should be shut down");

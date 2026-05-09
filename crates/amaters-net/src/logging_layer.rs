@@ -100,10 +100,7 @@ pub struct LoggingService<S> {
 
 impl<S, ReqBody, ResBody> Service<http::Request<ReqBody>> for LoggingService<S>
 where
-    S: Service<http::Request<ReqBody>, Response = http::Response<ResBody>>
-        + Clone
-        + Send
-        + 'static,
+    S: Service<http::Request<ReqBody>, Response = http::Response<ResBody>> + Clone + Send + 'static,
     S::Future: Send + 'static,
     S::Error: std::fmt::Display + Send + 'static,
     ReqBody: Send + 'static,
@@ -182,8 +179,8 @@ mod tests {
     use std::convert::Infallible;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::task::{Context, Poll};
 
     use tower_service::Service as _;
@@ -243,7 +240,12 @@ mod tests {
     impl CountingService {
         fn new() -> (Self, Arc<AtomicU32>) {
             let count = Arc::new(AtomicU32::new(0));
-            (Self { count: count.clone() }, count)
+            (
+                Self {
+                    count: count.clone(),
+                },
+                count,
+            )
         }
     }
 
@@ -277,7 +279,11 @@ mod tests {
             .await
             .expect("should succeed");
 
-        assert_eq!(count.load(Ordering::Relaxed), 1, "inner service called once");
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            1,
+            "inner service called once"
+        );
         assert!(
             !logs_contain("gRPC request"),
             "Off verbosity must not emit any gRPC log events"

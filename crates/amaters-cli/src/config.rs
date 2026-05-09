@@ -174,13 +174,8 @@ impl Config {
         std::fs::write(&tmp_path, &contents)
             .with_context(|| format!("Failed to write temporary config file: {:?}", tmp_path))?;
 
-        std::fs::rename(&tmp_path, path).with_context(|| {
-            format!(
-                "Failed to rename {:?} -> {:?}",
-                tmp_path,
-                path
-            )
-        })?;
+        std::fs::rename(&tmp_path, path)
+            .with_context(|| format!("Failed to rename {:?} -> {:?}", tmp_path, path))?;
 
         Ok(())
     }

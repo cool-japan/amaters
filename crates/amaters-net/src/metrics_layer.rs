@@ -188,7 +188,8 @@ impl NetMetrics {
 
     /// Record bytes received (request body size).
     pub fn add_bytes_received(&self, bytes: u64) {
-        self.bytes_received_total.fetch_add(bytes, Ordering::Relaxed);
+        self.bytes_received_total
+            .fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Record bytes sent (response body size).
@@ -321,7 +322,11 @@ impl NetMetrics {
 /// axum handler: serialise the current metrics snapshot as Prometheus text.
 async fn metrics_handler(
     axum::extract::State(metrics): axum::extract::State<Arc<NetMetrics>>,
-) -> (axum::http::StatusCode, [(axum::http::HeaderName, &'static str); 1], String) {
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
     let body = metrics.to_prometheus();
     (
         axum::http::StatusCode::OK,

@@ -41,7 +41,9 @@ impl OutputFormat {
 
 /// Returns `true` if every byte in `bytes` is printable ASCII, tab, or newline.
 pub fn is_text_safe(bytes: &[u8]) -> bool {
-    bytes.iter().all(|&b| b == b'\t' || b == b'\n' || (32..=126).contains(&b))
+    bytes
+        .iter()
+        .all(|&b| b == b'\t' || b == b'\n' || (32..=126).contains(&b))
 }
 
 /// Encode bytes as standard (padded) base64.
@@ -669,8 +671,8 @@ mod tests {
         let value = b"say \"hello\"";
         let line = format_record_ndjson(key, value);
         // Must parse as valid JSON — serde_json handles escaping.
-        let parsed: serde_json::Value =
-            serde_json::from_str(line.trim_end()).expect("should be valid JSON with escaped quotes");
+        let parsed: serde_json::Value = serde_json::from_str(line.trim_end())
+            .expect("should be valid JSON with escaped quotes");
         assert_eq!(parsed["value"], "say \"hello\"");
     }
 

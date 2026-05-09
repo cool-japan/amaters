@@ -151,9 +151,7 @@ impl<S: StorageEngine + Send + Sync + 'static> AqlServerBuilder<S> {
     /// to enable per-connection cert pickup; the same store can later be
     /// updated atomically via `store.store(Arc::new(new_config))`.
     #[cfg(feature = "mtls")]
-    pub fn tls_config_store(
-        &self,
-    ) -> Option<Arc<arc_swap::ArcSwap<rustls::ServerConfig>>> {
+    pub fn tls_config_store(&self) -> Option<Arc<arc_swap::ArcSwap<rustls::ServerConfig>>> {
         self.tls_config_store.as_ref().map(Arc::clone)
     }
 

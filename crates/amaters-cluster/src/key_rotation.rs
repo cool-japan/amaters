@@ -177,7 +177,10 @@ mod tests {
         assert!(mgr.lookup(3).is_some());
         assert!(mgr.lookup(2).is_some());
         assert!(mgr.lookup(1).is_some());
-        assert!(mgr.lookup(99).is_none(), "non-existent version returns None");
+        assert!(
+            mgr.lookup(99).is_none(),
+            "non-existent version returns None"
+        );
     }
 
     #[test]

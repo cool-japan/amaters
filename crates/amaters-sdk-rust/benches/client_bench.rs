@@ -117,18 +117,14 @@ fn bench_get(c: &mut Criterion) {
     for size in [64usize, 1024, 16 * 1024] {
         let key = make_key(size);
 
-        group.bench_with_input(
-            BenchmarkId::new("value_bytes", size),
-            &key,
-            |b, key| {
-                b.to_async(&rt).iter(|| async {
-                    let _ = client
-                        .get("bench_collection", key)
-                        .await
-                        .expect("get failed");
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("value_bytes", size), &key, |b, key| {
+            b.to_async(&rt).iter(|| async {
+                let _ = client
+                    .get("bench_collection", key)
+                    .await
+                    .expect("get failed");
+            });
+        });
     }
 
     group.finish();

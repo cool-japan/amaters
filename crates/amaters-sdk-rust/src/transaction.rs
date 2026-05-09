@@ -33,13 +33,8 @@ enum TransactionState {
 /// A single buffered write operation.
 #[derive(Debug, Clone)]
 enum TransactionOp {
-    Set {
-        key: Key,
-        value: CipherBlob,
-    },
-    Delete {
-        key: Key,
-    },
+    Set { key: Key, value: CipherBlob },
+    Delete { key: Key },
 }
 
 // ---------------------------------------------------------------------------
@@ -384,10 +379,7 @@ mod tests {
         tx.set(key.clone(), val.clone())
             .expect("set should succeed");
 
-        let result = tx
-            .get(&key)
-            .await
-            .expect("get should succeed (local hit)");
+        let result = tx.get(&key).await.expect("get should succeed (local hit)");
         assert_eq!(
             result.as_ref().map(|b| b.to_vec()),
             Some(val.to_vec()),
@@ -426,10 +418,7 @@ mod tests {
         tx.set(key.clone(), v1).expect("first set");
         tx.set(key.clone(), v2.clone()).expect("second set");
 
-        let result = tx
-            .get(&key)
-            .await
-            .expect("get should succeed");
+        let result = tx.get(&key).await.expect("get should succeed");
         assert_eq!(
             result.as_ref().map(|b| b.to_vec()),
             Some(v2.to_vec()),

@@ -146,7 +146,7 @@ pub struct MerkleTree {
 impl MerkleTree {
     /// Build a new [`MerkleTree`] from the given leaves.
     ///
-    /// - Empty input → root is the constant [`empty_root`].
+    /// - Empty input → root is the constant `empty_root`.
     /// - Single-leaf input → root is `hash_leaf(leaf)`.
     /// - Multi-leaf input → balanced tree with last-leaf duplication on
     ///   odd levels, as described at the module level.

@@ -91,10 +91,7 @@ pub struct TlsCreds {
 
 impl TlsCreds {
     /// Load `TlsCreds` from cert and key files on disk.
-    pub fn load_from_files(
-        cert_path: &Path,
-        key_path: &Path,
-    ) -> Result<Self, HotReloadError> {
+    pub fn load_from_files(cert_path: &Path, key_path: &Path) -> Result<Self, HotReloadError> {
         let cert_pem = std::fs::read(cert_path)?;
         let key_pem = std::fs::read(key_path)?;
         Ok(Self { cert_pem, key_pem })
@@ -179,10 +176,7 @@ pub async fn spawn_config_reloader(
 
             loop {
                 hangup.recv().await;
-                info!(
-                    "SIGHUP received — reloading config from {:?}",
-                    config_path
-                );
+                info!("SIGHUP received — reloading config from {:?}", config_path);
 
                 // Reload through ReloadableConfig (validates + section-aware swap).
                 match reloadable_for_task.reload_from_stored_path() {
@@ -256,9 +250,7 @@ pub async fn spawn_tls_reloader(
     })?;
 
     // Watch the directory that contains the cert file (non-recursive).
-    let cert_dir = cert_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let cert_dir = cert_path.parent().unwrap_or_else(|| Path::new("."));
     watcher.watch(cert_dir, RecursiveMode::NonRecursive)?;
 
     // Clone paths for use inside the spawned task.
@@ -273,9 +265,10 @@ pub async fn spawn_tls_reloader(
             match event {
                 Ok(e) => {
                     // Only reload on events that touch the cert or key file.
-                    let relevant = e.paths.iter().any(|p| {
-                        p == &cert_path_task || p == &key_path_task
-                    });
+                    let relevant = e
+                        .paths
+                        .iter()
+                        .any(|p| p == &cert_path_task || p == &key_path_task);
 
                     if !relevant {
                         continue;
@@ -284,16 +277,10 @@ pub async fn spawn_tls_reloader(
                     match TlsCreds::load_from_files(&cert_path_task, &key_path_task) {
                         Ok(new_creds) => {
                             tls_creds.store(Arc::new(new_creds));
-                            info!(
-                                "TLS credentials reloaded from {:?}",
-                                cert_path_task
-                            );
+                            info!("TLS credentials reloaded from {:?}", cert_path_task);
                         }
                         Err(e) => {
-                            error!(
-                                "TLS reload failed — keeping existing credentials: {}",
-                                e
-                            );
+                            error!("TLS reload failed — keeping existing credentials: {}", e);
                         }
                     }
                 }
@@ -328,8 +315,8 @@ pub fn swap_rustls_config(
     creds: &TlsCreds,
 ) -> Result<(), HotReloadError> {
     let creds_ref = TlsCredsRef::new(&creds.cert_pem, &creds.key_pem);
-    let new_config = build_rustls_config(&creds_ref)
-        .map_err(|e| HotReloadError::Rustls(e.to_string()))?;
+    let new_config =
+        build_rustls_config(&creds_ref).map_err(|e| HotReloadError::Rustls(e.to_string()))?;
     store.store(Arc::new(new_config));
     Ok(())
 }
@@ -403,9 +390,7 @@ pub async fn spawn_tls_reloader_with_rustls_store(
                     // Build the new rustls config first; if it fails, neither store
                     // is updated.
                     if let Err(e) = swap_rustls_config(&rustls_store, &new_creds) {
-                        error!(
-                            "TLS reload failed (rustls build) — keeping existing config: {e}",
-                        );
+                        error!("TLS reload failed (rustls build) — keeping existing config: {e}",);
                         continue;
                     }
 
@@ -464,8 +449,8 @@ mod tests {
     /// Reloading with a changed log level marks the Logging section as changed.
     #[test]
     fn test_config_diff_detects_log_level_change() {
-        use crate::config::diff;
         use crate::config::ReloadableSection;
+        use crate::config::diff;
         let old = make_config("127.0.0.1:7878");
         let mut new = old.clone();
         new.logging.level = "debug".to_string();
@@ -480,8 +465,8 @@ mod tests {
     /// Changing max_connections marks the RateLimit section as changed.
     #[test]
     fn test_config_diff_detects_rate_limit_change() {
-        use crate::config::diff;
         use crate::config::ReloadableSection;
+        use crate::config::diff;
         let old = make_config("127.0.0.1:7878");
         let mut new = old.clone();
         new.server.max_connections = old.server.max_connections + 500;
@@ -551,8 +536,10 @@ mod tests {
     /// load_from_files returns Io error for missing files.
     #[test]
     fn test_tls_creds_load_missing_file() {
-        let result =
-            TlsCreds::load_from_files(Path::new("/nonexistent/cert.pem"), Path::new("/nonexistent/key.pem"));
+        let result = TlsCreds::load_from_files(
+            Path::new("/nonexistent/cert.pem"),
+            Path::new("/nonexistent/key.pem"),
+        );
         assert!(result.is_err(), "Expected error for missing files");
     }
 
@@ -563,10 +550,16 @@ mod tests {
         let cert = dir.join("amaters_hot_reload_test_cert.pem");
         let key = dir.join("amaters_hot_reload_test_key.pem");
 
-        fs::write(&cert, b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n")
-            .expect("write cert");
-        fs::write(&key, b"-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n")
-            .expect("write key");
+        fs::write(
+            &cert,
+            b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write cert");
+        fs::write(
+            &key,
+            b"-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("write key");
 
         let creds = TlsCreds::load_from_files(&cert, &key).expect("load creds");
         assert!(!creds.cert_pem.is_empty());
@@ -651,7 +644,8 @@ mod tests {
         // error path of swap_rustls_config which doesn't need a working
         // initial config to verify the failure surface.
         let placeholder = make_placeholder_server_config();
-        let store: Arc<ArcSwap<rustls::ServerConfig>> = Arc::new(ArcSwap::from_pointee(placeholder));
+        let store: Arc<ArcSwap<rustls::ServerConfig>> =
+            Arc::new(ArcSwap::from_pointee(placeholder));
 
         let result = swap_rustls_config(&store, &creds);
         assert!(
@@ -670,12 +664,10 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (cert_pem, key_pem) = generate_pem_pair("swap.test");
 
-        let creds = TlsCreds {
-            cert_pem,
-            key_pem,
-        };
+        let creds = TlsCreds { cert_pem, key_pem };
         let placeholder = make_placeholder_server_config();
-        let store: Arc<ArcSwap<rustls::ServerConfig>> = Arc::new(ArcSwap::from_pointee(placeholder));
+        let store: Arc<ArcSwap<rustls::ServerConfig>> =
+            Arc::new(ArcSwap::from_pointee(placeholder));
 
         swap_rustls_config(&store, &creds).expect("swap should succeed");
         // The store now holds a non-placeholder config; we can't directly
@@ -702,7 +694,9 @@ mod tests {
     fn generate_pem_pair(cn: &str) -> (Vec<u8>, Vec<u8>) {
         use amaters_net::tls::SelfSignedGenerator;
         use rustls::pki_types::PrivateKeyDer;
-        let generator = SelfSignedGenerator::new(cn).with_san(cn).with_san("localhost");
+        let generator = SelfSignedGenerator::new(cn)
+            .with_san(cn)
+            .with_san("localhost");
         let (cert_der, key_der) = generator.generate().expect("generate cert");
         let cert_pem = pem_encode("CERTIFICATE", cert_der.as_ref());
         let key_pem = match key_der {

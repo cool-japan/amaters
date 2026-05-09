@@ -134,14 +134,37 @@ async fn main() -> anyhow::Result<()> {
     let collection = "healthcare_patients";
 
     let records = vec![
-        PatientRecord { id: 1001, age: 52, dna_marker: "BRCA1".to_string() },
-        PatientRecord { id: 1002, age: 67, dna_marker: "BRCA2".to_string() },
-        PatientRecord { id: 1003, age: 71, dna_marker: "TP53".to_string() },
-        PatientRecord { id: 1004, age: 58, dna_marker: "MLH1".to_string() },
-        PatientRecord { id: 1005, age: 79, dna_marker: "APC".to_string() },
+        PatientRecord {
+            id: 1001,
+            age: 52,
+            dna_marker: "BRCA1".to_string(),
+        },
+        PatientRecord {
+            id: 1002,
+            age: 67,
+            dna_marker: "BRCA2".to_string(),
+        },
+        PatientRecord {
+            id: 1003,
+            age: 71,
+            dna_marker: "TP53".to_string(),
+        },
+        PatientRecord {
+            id: 1004,
+            age: 58,
+            dna_marker: "MLH1".to_string(),
+        },
+        PatientRecord {
+            id: 1005,
+            age: 79,
+            dna_marker: "APC".to_string(),
+        },
     ];
 
-    println!("Step 3: Encrypting and inserting {} patient records ...", records.len());
+    println!(
+        "Step 3: Encrypting and inserting {} patient records ...",
+        records.len()
+    );
 
     for record in &records {
         let key = Key::from_str(&format!("patient:{}", record.id));
@@ -202,7 +225,10 @@ async fn main() -> anyhow::Result<()> {
             println!("  (Unexpected single result from filter query)");
         }
         amaters_sdk_rust::QueryResult::Success { affected_rows } => {
-            println!("  Query returned a Success result with {} affected rows.", affected_rows);
+            println!(
+                "  Query returned a Success result with {} affected rows.",
+                affected_rows
+            );
             println!("  This usually means the server processed the filter but returned no rows.");
         }
     }
@@ -225,8 +251,16 @@ fn demo_local_encrypt_decrypt(encryptor: &FheEncryptor) -> anyhow::Result<()> {
     println!("--- Local FHE Demo (no server) ---\n");
 
     let records = vec![
-        PatientRecord { id: 2001, age: 62, dna_marker: "BRCA1".to_string() },
-        PatientRecord { id: 2002, age: 70, dna_marker: "TP53".to_string() },
+        PatientRecord {
+            id: 2001,
+            age: 62,
+            dna_marker: "BRCA1".to_string(),
+        },
+        PatientRecord {
+            id: 2002,
+            age: 70,
+            dna_marker: "TP53".to_string(),
+        },
     ];
 
     for record in &records {

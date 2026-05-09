@@ -76,8 +76,14 @@ async fn diff_keys(
 ) -> Result<String> {
     // NOTE: Real implementation would call client.get() twice.
     // For now we return a placeholder that exercises the diff engine.
-    let text_a = format!("# {}/{}\n(value not available without server)\n", collection_a, key_a);
-    let text_b = format!("# {}/{}\n(value not available without server)\n", collection_b, key_b);
+    let text_a = format!(
+        "# {}/{}\n(value not available without server)\n",
+        collection_a, key_a
+    );
+    let text_b = format!(
+        "# {}/{}\n(value not available without server)\n",
+        collection_b, key_b
+    );
 
     produce_text_diff(&text_a, &text_b, key_a, key_b, format)
 }
@@ -398,8 +404,10 @@ mod tests {
         .expect("diff should succeed");
 
         // Should contain unified diff markers for key1.
-        assert!(result.contains("--- key1") || result.contains("+++ key1"),
-            "Unified output should reference key1: {result}");
+        assert!(
+            result.contains("--- key1") || result.contains("+++ key1"),
+            "Unified output should reference key1: {result}"
+        );
     }
 
     #[tokio::test]
@@ -421,7 +429,10 @@ mod tests {
             serde_json::from_str(&result).expect("output should be valid JSON");
         // modified entry should exist
         let modified = parsed["modified"].as_array().expect("modified array");
-        assert!(!modified.is_empty(), "Should have at least one modified entry");
+        assert!(
+            !modified.is_empty(),
+            "Should have at least one modified entry"
+        );
         assert_eq!(modified[0]["key"], "key1");
     }
 
@@ -449,8 +460,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_snapshots_added_removed_modified() {
-        let path_a = temp_ndjson("arm_a", &[("kept", "same"), ("old", "only-in-a"), ("changed", "before")]);
-        let path_b = temp_ndjson("arm_b", &[("kept", "same"), ("new", "only-in-b"), ("changed", "after")]);
+        let path_a = temp_ndjson(
+            "arm_a",
+            &[
+                ("kept", "same"),
+                ("old", "only-in-a"),
+                ("changed", "before"),
+            ],
+        );
+        let path_b = temp_ndjson(
+            "arm_b",
+            &[("kept", "same"), ("new", "only-in-b"), ("changed", "after")],
+        );
 
         let result = run_diff(
             DiffMode::Snapshots {
@@ -494,7 +515,10 @@ mod tests {
     #[test]
     fn test_diff_ciphertext_guard_accepts_plain_text() {
         let result = guard_not_ciphertext(b"hello world");
-        assert!(result.is_ok(), "Plain text should pass the ciphertext guard");
+        assert!(
+            result.is_ok(),
+            "Plain text should pass the ciphertext guard"
+        );
     }
 
     #[test]

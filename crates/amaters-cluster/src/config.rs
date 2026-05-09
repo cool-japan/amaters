@@ -127,7 +127,7 @@ pub struct NodeConfig {
 
     /// Number of [`crate::key_rotation::KeyVersion`]s the
     /// [`crate::key_rotation::KeyManager`] retains in its history (current
-    /// + previous keys).  Default 3.  Lower values reclaim memory faster
+    /// and previous keys). Default 3. Lower values reclaim memory faster
     /// at the cost of decrypting fewer historical entries after rotation.
     #[serde(default = "default_key_retention_count")]
     pub key_retention_count: usize,
@@ -181,7 +181,11 @@ impl NodeConfig {
         }
         if let Ok(v) = std::env::var("AMATERS_PEERS") {
             // Comma-separated list of "node_id=addr" pairs
-            self.peers = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            self.peers = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
         if let Ok(v) = std::env::var("AMATERS_HEARTBEAT_INTERVAL_MS") {
             if let Ok(n) = v.parse::<u64>() {
@@ -467,7 +471,10 @@ node_id = 0
         let has_node_id_error = errors
             .iter()
             .any(|e| matches!(e, ConfigError::Validation { field, .. } if field == "node_id"));
-        assert!(has_node_id_error, "expected a Validation error for 'node_id'");
+        assert!(
+            has_node_id_error,
+            "expected a Validation error for 'node_id'"
+        );
     }
 
     /// When `election_timeout_ms < 2 * heartbeat_interval_ms`, validation must

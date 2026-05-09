@@ -258,8 +258,7 @@ impl EntryEncryptor {
     pub fn encrypt(&self, entry_index: u64, plaintext: &[u8]) -> RaftResult<EncryptedPayload> {
         let guard = self.keys.read();
         let (key_version, master_key) = guard.current();
-        let (key_bytes, nonce_bytes) =
-            Self::derive_key_and_nonce_from(master_key, entry_index)?;
+        let (key_bytes, nonce_bytes) = Self::derive_key_and_nonce_from(master_key, entry_index)?;
 
         let key = Key::<Aes256Gcm>::from(key_bytes);
         let cipher = Aes256Gcm::new(&key);
@@ -302,8 +301,7 @@ impl EntryEncryptor {
                         payload.key_version
                     ),
                 })?;
-        let (key_bytes, _derived_nonce) =
-            Self::derive_key_and_nonce_from(master_key, entry_index)?;
+        let (key_bytes, _derived_nonce) = Self::derive_key_and_nonce_from(master_key, entry_index)?;
 
         let key = Key::<Aes256Gcm>::from(key_bytes);
         let cipher = Aes256Gcm::new(&key);
@@ -544,7 +542,9 @@ mod tests {
         let mgr = Arc::new(RwLock::new(KeyManager::new(k1, 3)));
         let encryptor = EntryEncryptor::with_key_manager(Arc::clone(&mgr));
 
-        let payload_v1 = encryptor.encrypt(42, b"persisted-under-v1").expect("encrypt");
+        let payload_v1 = encryptor
+            .encrypt(42, b"persisted-under-v1")
+            .expect("encrypt");
         assert_eq!(payload_v1.key_version, 1);
 
         // Rotate twice — v1 key must still be retained because retention=3.

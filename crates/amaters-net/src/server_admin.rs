@@ -167,11 +167,7 @@ pub async fn handle_admin_command<S: StorageEngine>(
     match op.as_str() {
         // ── METRICS ──────────────────────────────────────────────────────────
         "METRICS" => {
-            let key_count = storage
-                .keys()
-                .await
-                .map(|k| k.len() as u64)
-                .unwrap_or(0);
+            let key_count = storage.keys().await.map(|k| k.len() as u64).unwrap_or(0);
             let json = serde_json::json!({
                 "key_count": key_count,
                 "storage_type": "memory",
@@ -205,8 +201,7 @@ pub async fn handle_admin_command<S: StorageEngine>(
 
         // ── STATS ─────────────────────────────────────────────────────────────
         "STATS" => {
-            let (key_count, total_bytes, truncated) =
-                compute_stats(storage, STATS_KEY_LIMIT).await;
+            let (key_count, total_bytes, truncated) = compute_stats(storage, STATS_KEY_LIMIT).await;
             let json = serde_json::json!({
                 "key_count": key_count,
                 "total_bytes": total_bytes,
@@ -468,10 +463,7 @@ pub async fn handle_admin_command<S: StorageEngine>(
 ///
 /// Uses `try_write()` with a silent drop on contention to avoid deadlocks
 /// during error-handling paths that may already hold the lock.
-pub fn push_log_entry(
-    recent_log: &Arc<RwLock<VecDeque<LogEntry>>>,
-    message: String,
-) {
+pub fn push_log_entry(recent_log: &Arc<RwLock<VecDeque<LogEntry>>>, message: String) {
     let entry = LogEntry {
         message,
         timestamp: SystemTime::now(),
@@ -589,8 +581,13 @@ mod admin_tests {
         let v = CipherBlob::new(b"hello".to_vec());
         storage.put(&k, &v).await.expect("put failed");
 
-        let dir = std::env::temp_dir()
-            .join(format!("amaters_test_backup_{}", std::time::SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+        let dir = std::env::temp_dir().join(format!(
+            "amaters_test_backup_{}",
+            std::time::SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         let dir_str = dir.to_string_lossy().to_string();
 
         let json_str = run_cmd(&format!("BACKUP {dir_str} full"), &storage, &log)
@@ -625,17 +622,18 @@ mod admin_tests {
         let v = CipherBlob::new(vec![42u8; 3]);
         storage.put(&k, &v).await.expect("put failed");
 
-        let dir = std::env::temp_dir()
-            .join(format!("amaters_test_inc_{}", std::time::SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+        let dir = std::env::temp_dir().join(format!(
+            "amaters_test_inc_{}",
+            std::time::SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         let dir_str = dir.to_string_lossy().to_string();
 
-        let json_str = run_cmd(
-            &format!("BACKUP {dir_str} incremental"),
-            &storage,
-            &log,
-        )
-        .await
-        .expect("BACKUP incremental returned None");
+        let json_str = run_cmd(&format!("BACKUP {dir_str} incremental"), &storage, &log)
+            .await
+            .expect("BACKUP incremental returned None");
 
         let resp: serde_json::Value = serde_json::from_str(&json_str).expect("invalid JSON");
         assert_eq!(resp["kind"], "incremental");
@@ -670,8 +668,13 @@ mod admin_tests {
             .await
             .expect("put failed");
 
-        let dir = std::env::temp_dir()
-            .join(format!("amaters_test_restore_{}", std::time::SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+        let dir = std::env::temp_dir().join(format!(
+            "amaters_test_restore_{}",
+            std::time::SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         let dir_str = dir.to_string_lossy().to_string();
 
         // Backup from source.
@@ -695,10 +698,7 @@ mod admin_tests {
             Some(b"alpha".as_ref())
         );
         let got_b = target.get(&k2).await.expect("get failed");
-        assert_eq!(
-            got_b.as_ref().map(|b| b.as_bytes()),
-            Some(b"beta".as_ref())
-        );
+        assert_eq!(got_b.as_ref().map(|b| b.as_bytes()), Some(b"beta".as_ref()));
 
         let _ = tokio::fs::remove_dir_all(&dir_str).await;
     }

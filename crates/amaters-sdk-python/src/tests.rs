@@ -811,8 +811,7 @@ fn test_prefix_upper_bound_truncates_trailing_ff() {
     assert_eq!(result, vec![0x10, 0x21]);
 
     // ``[0x10, 0x20, 0xFF, 0xFF]`` → ``[0x10, 0x21]``.
-    let result =
-        prefix_upper_bound(&[0x10, 0x20, 0xFF, 0xFF]).expect("should return upper bound");
+    let result = prefix_upper_bound(&[0x10, 0x20, 0xFF, 0xFF]).expect("should return upper bound");
     assert_eq!(result, vec![0x10, 0x21]);
 }
 
@@ -957,7 +956,10 @@ async fn test_prefix_query_no_matches_returns_empty() -> anyhow::Result<()> {
     let end_key = Key::new(end);
 
     let results = client.range("default", &start_key, &end_key).await?;
-    assert!(results.is_empty(), "no keys should match a non-existent prefix");
+    assert!(
+        results.is_empty(),
+        "no keys should match a non-existent prefix"
+    );
 
     mock.shutdown().await;
     Ok(())

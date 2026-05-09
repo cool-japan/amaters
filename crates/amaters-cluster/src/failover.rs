@@ -717,8 +717,14 @@ mod tests {
             FailoverCoordinator::new(HeartbeatConfig::default(), FailoverConfig::default(), 1);
 
         // No leader known yet — should not redirect (unknown destination)
-        assert!(!coord.should_redirect(1), "no redirect when leader is unknown");
-        assert!(!coord.should_redirect(2), "no redirect when leader is unknown");
+        assert!(
+            !coord.should_redirect(1),
+            "no redirect when leader is unknown"
+        );
+        assert!(
+            !coord.should_redirect(2),
+            "no redirect when leader is unknown"
+        );
 
         // Set node 2 as leader
         coord.set_leader(2);

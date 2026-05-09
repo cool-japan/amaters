@@ -499,7 +499,13 @@ mod tests {
     fn test_default_key_atomic_write_no_partial_file() -> Result<()> {
         let (mut config, path) = make_temp_config("atomic_write");
 
-        handle_key_default(&mut config, &path, Some("atomic-key".to_string()), false, false)?;
+        handle_key_default(
+            &mut config,
+            &path,
+            Some("atomic-key".to_string()),
+            false,
+            false,
+        )?;
 
         // The .tmp file must be gone after successful write.
         let tmp_path = path.with_extension("toml.tmp");

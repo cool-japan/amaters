@@ -45,11 +45,11 @@ pub mod wal;
 // Re-exports for convenience
 pub use encryption::{EncryptedPayload, EntryEncryptor, LogEncryptionKey, LogIntegrityVerifier};
 pub use error::{RaftError, RaftResult};
-pub use key_rotation::{KeyManager, KeyVersion, LEGACY_KEY_VERSION};
-pub use merkle::{MerkleProof, MerkleTree};
 pub use failover::{FailoverConfig, FailoverCoordinator, FailoverEvent};
 pub use heartbeat::FailureDetector;
+pub use key_rotation::{KeyManager, KeyVersion, LEGACY_KEY_VERSION};
 pub use log::{ApplyResult, Command, LogEntry, RaftLog, SnapshotData, StateMachine};
+pub use merkle::{MerkleProof, MerkleTree};
 pub use metrics::ClusterMetrics;
 pub use node::RaftNode;
 pub use persistence::{FilePersistence, MemoryPersistence, RaftPersistence};

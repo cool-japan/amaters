@@ -430,25 +430,21 @@ fn bench_grpc_set(c: &mut Criterion) {
 
     for size in [64usize, 1024, 16 * 1024] {
         let mut counter: u64 = 0;
-        group.bench_with_input(
-            BenchmarkId::new("value_bytes", size),
-            &size,
-            |b, &sz| {
-                b.to_async(&rt).iter(|| {
-                    let idx = counter;
-                    counter = counter.wrapping_add(1);
-                    let req = build_set_query(idx, sz);
-                    let mut client_clone = client.clone();
-                    async move {
-                        let _ = client_clone
-                            .execute_query(req)
-                            .await
-                            .expect("set rpc")
-                            .into_inner();
-                    }
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("value_bytes", size), &size, |b, &sz| {
+            b.to_async(&rt).iter(|| {
+                let idx = counter;
+                counter = counter.wrapping_add(1);
+                let req = build_set_query(idx, sz);
+                let mut client_clone = client.clone();
+                async move {
+                    let _ = client_clone
+                        .execute_query(req)
+                        .await
+                        .expect("set rpc")
+                        .into_inner();
+                }
+            });
+        });
     }
 
     drop(client);
@@ -530,10 +526,7 @@ fn bench_grpc_delete(c: &mut Criterion) {
             let del_req = build_delete_query(idx);
             let mut client_clone = client.clone();
             async move {
-                let _ = client_clone
-                    .execute_query(set_req)
-                    .await
-                    .expect("set rpc");
+                let _ = client_clone.execute_query(set_req).await.expect("set rpc");
                 let _ = client_clone
                     .execute_query(del_req)
                     .await
@@ -565,26 +558,22 @@ fn bench_grpc_range(c: &mut Criterion) {
 
     for limit in [16u64, 64, 256] {
         group.throughput(Throughput::Elements(limit));
-        group.bench_with_input(
-            BenchmarkId::new("range_limit", limit),
-            &limit,
-            |b, &lim| {
-                let mut counter: u64 = 0;
-                b.to_async(&rt).iter(|| {
-                    let start = counter % 900;
-                    counter = counter.wrapping_add(lim);
-                    let req = build_range_query(start, start + lim);
-                    let mut client_clone = client.clone();
-                    async move {
-                        let _ = client_clone
-                            .execute_query(req)
-                            .await
-                            .expect("range rpc")
-                            .into_inner();
-                    }
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("range_limit", limit), &limit, |b, &lim| {
+            let mut counter: u64 = 0;
+            b.to_async(&rt).iter(|| {
+                let start = counter % 900;
+                counter = counter.wrapping_add(lim);
+                let req = build_range_query(start, start + lim);
+                let mut client_clone = client.clone();
+                async move {
+                    let _ = client_clone
+                        .execute_query(req)
+                        .await
+                        .expect("range rpc")
+                        .into_inner();
+                }
+            });
+        });
     }
 
     drop(client);

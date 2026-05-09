@@ -1123,8 +1123,8 @@ impl AmateRSClient {
 
     /// Begin a new transaction bound to `collection`.
     ///
-    /// All operations are buffered locally until [`Transaction::commit`] or
-    /// [`Transaction::rollback`] is called.  Dropping the transaction without
+    /// All operations are buffered locally until [`crate::Transaction::commit`] or
+    /// [`crate::Transaction::rollback`] is called.  Dropping the transaction without
     /// committing or rolling back emits a `tracing::warn!` for every uncommitted
     /// operation.
     ///

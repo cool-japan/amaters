@@ -48,8 +48,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use futures::Stream;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tracing::warn;
@@ -363,7 +363,10 @@ mod tests {
 
     #[test]
     fn test_build_rustls_config_invalid_cert_errors() {
-        let creds = TlsCredsRef::new(b"-----BEGIN GARBAGE-----\nnope\n-----END GARBAGE-----\n", b"");
+        let creds = TlsCredsRef::new(
+            b"-----BEGIN GARBAGE-----\nnope\n-----END GARBAGE-----\n",
+            b"",
+        );
         let err = build_rustls_config(&creds).expect_err("should fail");
         assert!(matches!(err, NetError::TlsError(_)), "got {err:?}");
     }

@@ -5,7 +5,9 @@
 mod cli;
 
 use amaters_server::config::ServerConfig;
-use amaters_server::hot_reload::{HotReloadError, TlsCreds, spawn_config_reloader, spawn_tls_reloader};
+use amaters_server::hot_reload::{
+    HotReloadError, TlsCreds, spawn_config_reloader, spawn_tls_reloader,
+};
 use amaters_server::server::Server;
 use amaters_server::shutdown::setup_signal_handlers;
 use arc_swap::ArcSwap;
@@ -170,14 +172,15 @@ async fn handle_start(
                             );
                         }
                         Err(e) => {
-                            warn!("TLS reloader could not start, continuing without live cert rotation: {}", e);
+                            warn!(
+                                "TLS reloader could not start, continuing without live cert rotation: {}",
+                                e
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    return Err(
-                        format!("Failed to load initial TLS credentials: {}", e).into()
-                    );
+                    return Err(format!("Failed to load initial TLS credentials: {}", e).into());
                 }
             }
         }

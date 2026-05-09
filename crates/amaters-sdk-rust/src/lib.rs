@@ -126,7 +126,6 @@ pub mod transaction;
 
 // Re-export main types
 pub use cache::{CacheStats, InvalidationPolicy, QueryCache, QueryCacheConfig};
-pub use mock::{MockServerBuilder, MockServerHandle, MockStorage};
 pub use client::{
     AmateRSClient, PaginatedQueryBuilder, PaginatedResult, PaginationConfig, QueryResult,
     ServerInfo, SortConfig, SortField, SortOrder,
@@ -138,6 +137,7 @@ pub use connection_manager::{
 };
 pub use error::{Result, SdkError};
 pub use fhe::{FheEncryptor, FheKeys};
+pub use mock::{MockServerBuilder, MockServerHandle, MockStorage};
 pub use query::{FilterBuilder, FluentQueryBuilder, PredicateBuilder, query};
 pub use streaming::{QueryStream, Row, RowSender, StreamConfig, spawn_stub_producer};
 pub use transaction::Transaction;
