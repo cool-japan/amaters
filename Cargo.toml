@@ -102,8 +102,8 @@ serde_yaml = "0.9"
 bytemuck = { version = "1.25", features = ["derive"] }
 memmap2 = "0.9"
 crc32fast = "1.5"
-oxiarc-lz4 = "0.2"
-oxiarc-deflate = "0.2"
+oxiarc-lz4 = "0.3.0"
+oxiarc-deflate = "0.3.0"
 blake3 = "1.8"  # Fast hashing
 aes-gcm = "0.10"  # AES-256-GCM authenticated encryption (pure Rust)
 hmac = "0.12"     # HMAC construction (pure Rust)
