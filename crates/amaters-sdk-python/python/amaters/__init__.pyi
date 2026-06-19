@@ -941,9 +941,9 @@ class AmateRSClient:
         """
         ...
 
-    def pool_stats(self) -> Dict[str, int]:
+    async def pool_stats(self) -> Dict[str, int]:
         """
-        Return connection-pool statistics.
+        Return connection-pool statistics (async coroutine).
 
         Returns:
             A dictionary with the following integer keys:
@@ -951,23 +951,25 @@ class AmateRSClient:
             * ``"total_connections"`` — total connections in the pool.
             * ``"idle_connections"`` — connections currently idle.
             * ``"active_connections"`` — connections currently in use.
+            * ``"max_connections"`` — pool capacity.
 
         Example::
 
-            stats = client.pool_stats()
+            stats = await client.pool_stats()
             print(f"Active: {stats['active_connections']}")
         """
         ...
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """
-        Close all pooled connections.
+        Close all pooled connections (async coroutine).
 
-        Called automatically when the client is used as a context manager.
+        Called automatically when the client is used as an async context manager.
+        Prefer ``await client.close()`` in async code.
 
         Example::
 
-            client.close()
+            await client.close()
         """
         ...
 

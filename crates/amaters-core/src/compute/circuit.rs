@@ -71,6 +71,16 @@ pub enum CircuitNode {
         left: Box<CircuitNode>,
         right: Box<CircuitNode>,
     },
+
+    /// N-ary operation for associative+commutative ops (optimizer-only IR)
+    ///
+    /// Valid only for associative+commutative operators: Add, Mul, And, Or, Xor.
+    /// Created by the optimizer's gate fusion pass; BinaryOp is canonical.
+    /// Invariant: `operands.len() >= 2`.
+    NaryOp {
+        op: BinaryOperator,
+        operands: Vec<CircuitNode>,
+    },
 }
 
 /// Binary operators
@@ -175,6 +185,16 @@ impl std::fmt::Display for CircuitNode {
             }
             CircuitNode::Compare { op, left, right } => {
                 write!(f, "({} {} {})", left, op.as_str(), right)
+            }
+            CircuitNode::NaryOp { op, operands } => {
+                write!(f, "{}(", op.as_str())?;
+                for (i, operand) in operands.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", operand)?;
+                }
+                write!(f, ")")
             }
         }
     }
@@ -367,6 +387,46 @@ impl Circuit {
 
                 Ok(EncryptedType::Bool)
             }
+            CircuitNode::NaryOp { op, operands } => {
+                if operands.len() < 2 {
+                    return Err(AmateRSError::FheComputation(ErrorContext::new(
+                        "NaryOp requires at least 2 operands".to_string(),
+                    )));
+                }
+                let first_type = Self::infer_type(&operands[0], variable_types)?;
+                for operand in &operands[1..] {
+                    let t = Self::infer_type(operand, variable_types)?;
+                    if t != first_type {
+                        return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
+                            "NaryOp operands have mismatched types: {} and {}",
+                            first_type, t
+                        ))));
+                    }
+                }
+                match op {
+                    BinaryOperator::And | BinaryOperator::Or | BinaryOperator::Xor => {
+                        if first_type != EncryptedType::Bool {
+                            return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
+                                "Logical NaryOp requires boolean operands, got {}",
+                                first_type
+                            ))));
+                        }
+                        Ok(EncryptedType::Bool)
+                    }
+                    BinaryOperator::Add | BinaryOperator::Mul => {
+                        if !first_type.is_numeric() {
+                            return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
+                                "Arithmetic NaryOp requires numeric operands, got {}",
+                                first_type
+                            ))));
+                        }
+                        Ok(first_type)
+                    }
+                    BinaryOperator::Sub => Err(AmateRSError::FheComputation(ErrorContext::new(
+                        "NaryOp is not valid for Sub (non-associative)".to_string(),
+                    ))),
+                }
+            }
         }
     }
 
@@ -383,6 +443,12 @@ impl Circuit {
             }
 
             CircuitNode::UnaryOp { operand, .. } => 1 + Self::compute_depth(operand),
+            CircuitNode::NaryOp { operands, .. } => {
+                let max_operand_depth = operands.iter().map(Self::compute_depth).max().unwrap_or(1);
+                let n = operands.len();
+                let log2_n = (n as f64).log2().ceil() as usize;
+                log2_n.max(1) + max_operand_depth
+            }
         }
     }
 
@@ -399,6 +465,10 @@ impl Circuit {
             }
 
             CircuitNode::UnaryOp { operand, .. } => 1 + Self::count_gates(operand),
+            CircuitNode::NaryOp { operands, .. } => {
+                let inner_gates: usize = operands.iter().map(Self::count_gates).sum();
+                inner_gates + operands.len().saturating_sub(1)
+            }
         }
     }
 
@@ -433,6 +503,22 @@ impl Circuit {
             }
 
             CircuitNode::UnaryOp { operand, .. } => Self::validate_node(operand, variable_types),
+            CircuitNode::NaryOp { op, operands } => {
+                if operands.len() < 2 {
+                    return Err(AmateRSError::FheComputation(ErrorContext::new(
+                        "NaryOp requires at least 2 operands".to_string(),
+                    )));
+                }
+                if op == &BinaryOperator::Sub {
+                    return Err(AmateRSError::FheComputation(ErrorContext::new(
+                        "NaryOp is not valid for Sub (non-associative)".to_string(),
+                    )));
+                }
+                for operand in operands {
+                    Self::validate_node(operand, variable_types)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -757,6 +843,16 @@ pub fn encrypt_circuit_constants(node: &CircuitNode, key: &[u8]) -> Result<Circu
                 right: Box::new(right),
             })
         }
+        CircuitNode::NaryOp { op, operands } => {
+            let new_operands: Result<Vec<CircuitNode>> = operands
+                .iter()
+                .map(|o| encrypt_circuit_constants(o, key))
+                .collect();
+            Ok(CircuitNode::NaryOp {
+                op: *op,
+                operands: new_operands?,
+            })
+        }
     }
 }
 
@@ -809,6 +905,9 @@ pub fn count_plaintext_constants(node: &CircuitNode) -> usize {
             count_plaintext_constants(left) + count_plaintext_constants(right)
         }
         CircuitNode::UnaryOp { operand, .. } => count_plaintext_constants(operand),
+        CircuitNode::NaryOp { operands, .. } => {
+            operands.iter().map(count_plaintext_constants).sum()
+        }
     }
 }
 
@@ -821,6 +920,9 @@ pub fn count_encrypted_constants(node: &CircuitNode) -> usize {
             count_encrypted_constants(left) + count_encrypted_constants(right)
         }
         CircuitNode::UnaryOp { operand, .. } => count_encrypted_constants(operand),
+        CircuitNode::NaryOp { operands, .. } => {
+            operands.iter().map(count_encrypted_constants).sum()
+        }
     }
 }
 

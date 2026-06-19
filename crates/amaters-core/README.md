@@ -7,9 +7,9 @@ Core kernel for AmateRS - Fully Homomorphic Encrypted Database
 `amaters-core` is the foundational crate of AmateRS, providing the core infrastructure for encrypted data storage and computation. It implements the **Iwato** (storage) and **Yata** (compute) components of the AmateRS architecture.
 
 **Status:** Alpha (functional, API may change)
-**Version:** 0.2.0
-**Tests:** 429 passing, 0 failures
-**Public API:** 609 items
+**Version:** 0.2.2
+**Tests:** 481 passing, 0 failures
+**Public API:** ~703 items
 **Stubs:** 0 (`todo!()` / `unimplemented!()`)
 
 ## Architecture
@@ -170,6 +170,13 @@ fn risky_operation(value: &[u8]) -> Result<()> {
 | `gpu` | Enable GPU detection and acceleration hooks |
 | `cuda` | Enable CUDA backend (requires `gpu`) |
 | `metal` | Enable Metal backend for macOS (requires `gpu`) |
+| `io-uring` | Enable io-uring WAL writer (Linux only) |
+
+## What's New in v0.2.2
+
+- **UringWalWriter** — io-uring-backed WAL writer for Linux (feature `io-uring`), enabling kernel-bypass async I/O for write-ahead log operations
+- **IndexExtractor trait** — automated secondary index maintenance via a composable extractor interface; storage engines call `extract_index_entries` on write
+- **Secondary index automation** — `LsmTreeStorage` and `MemoryStorage` both drive `IndexExtractor`-based index maintenance automatically on `put`/`delete` operations
 
 ## Dependencies
 
@@ -203,7 +210,7 @@ cargo test
 cargo bench
 ```
 
-429 tests pass across unit tests, integration tests, and property-based tests (proptest).
+481 tests pass across unit tests, integration tests, and property-based tests (proptest).
 
 ## Implemented FHE Types and Operations
 
@@ -234,7 +241,7 @@ cargo bench
 | Phase 1 | Core types, error system, in-memory storage | Done |
 | Phase 2 | LSM-Tree, WAL, WiscKey, SSTable, compaction, secondary index, backup | Done |
 | Phase 3 | FHE compute engine, optimizer, planner, key management | Done (Alpha) |
-| Phase 4 | Query optimization, io_uring, GPU acceleration | Planned |
+| Phase 4 | Query optimization, io_uring, GPU acceleration | Partial (io-uring WAL, index automation) |
 | Phase 5 | Production hardening, security audit, distributed consensus | Planned |
 
 ## License

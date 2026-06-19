@@ -2,7 +2,7 @@
 
 Command-line interface for AmateRS
 
-**Status:** Alpha | **Version:** 0.2.0 | **License:** Apache-2.0 | **Tests:** 243 | **Public items:** 87
+**Status:** Alpha | **Version:** 0.2.2 | **License:** Apache-2.0 | **Tests:** 208 | **Public items:** 87
 
 ## Overview
 
@@ -67,6 +67,7 @@ amaters-cli repl
 # - Arrow keys for history navigation
 # - Ctrl-D or "exit" to quit
 # - "!" prefix to run a shell command (bang expansion)
+# - "explain <command>" to show the QueryPlanner plan without sending to server
 # - Multi-line input with trailing backslash
 # - Session stats shown on exit
 ```

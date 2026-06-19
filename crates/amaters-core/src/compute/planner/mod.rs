@@ -1,52 +1,15 @@
-//! Query planner with predicate pushdown and cost-based optimization
-//!
-//! This module provides a query planner that transforms high-level `Query` objects
-//! into optimized physical execution plans. It applies several optimization strategies:
-//!
-//! 1. **Predicate Pushdown** - Push filter predicates as close to the data source as possible
-//! 2. **Filter Merging** - Combine adjacent filter operations into compound predicates
-//! 3. **Cost-Based Optimization** - Estimate and compare plan costs to choose the cheapest one
-//! 4. **Range Scan Conversion** - Convert key-range filters into efficient range scans
-//!
-//! # Architecture
-//!
-//! The planner works in three phases:
-//!
-//! 1. **Logical Planning** - Convert a `Query` into a `LogicalPlan` tree
-//! 2. **Logical Optimization** - Apply rewrite rules (predicate pushdown, filter merge, etc.)
-//! 3. **Physical Planning** - Convert the optimized logical plan into a `PhysicalPlan`
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use amaters_core::compute::planner::QueryPlanner;
-//! use amaters_core::types::{Query, QueryBuilder, Predicate, col, CipherBlob};
-//!
-//! let planner = QueryPlanner::new();
-//! let query = QueryBuilder::new("users").filter(
-//!     Predicate::Gt(col("age"), CipherBlob::new(vec![18]))
-//! );
-//!
-//! let plan = planner.plan(&query)?;
-//! let cost = planner.estimate_cost(&plan);
-//! println!("Estimated cost: {}", cost.total_cost);
-//! ```
+// Copyright 2026 COOLJAPAN OU (Team KitaSan)
+// SPDX-License-Identifier: Apache-2.0
 
+pub use super::plan_cache::{CacheKey, CacheStats, CachedPlan, PlanCache, PlanCacheConfig};
 use crate::compute::EncryptedType;
 use crate::compute::circuit::Circuit;
 use crate::compute::predicate::PredicateCompiler;
 use crate::error::{AmateRSError, ErrorContext, Result};
-use crate::types::{CipherBlob, ColumnRef, Key, Predicate, Query};
+use crate::types::{CipherBlob, ColumnRef, JoinType, Key, Predicate, Query};
 use dashmap::DashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-
-pub use super::plan_cache::{CacheKey, CacheStats, CachedPlan, PlanCache, PlanCacheConfig};
-
-// ---------------------------------------------------------------------------
-// Logical plan
-// ---------------------------------------------------------------------------
-
 /// Logical query plan node
 ///
 /// Represents the *intent* of a query before physical execution details
@@ -58,7 +21,6 @@ pub enum LogicalPlan {
         /// Name of the collection to scan
         collection: String,
     },
-
     /// Range scan with start/end keys
     RangeScan {
         /// Name of the collection
@@ -68,7 +30,6 @@ pub enum LogicalPlan {
         /// Exclusive end key (None = end)
         end_key: Option<Vec<u8>>,
     },
-
     /// Filter with predicate (operates on encrypted data via FHE)
     Filter {
         /// Input plan to filter
@@ -76,7 +37,6 @@ pub enum LogicalPlan {
         /// Predicate to evaluate
         predicate: Predicate,
     },
-
     /// Projection (select specific columns)
     Project {
         /// Input plan to project
@@ -84,7 +44,6 @@ pub enum LogicalPlan {
         /// Column names to retain
         columns: Vec<String>,
     },
-
     /// Limit number of results
     Limit {
         /// Input plan to limit
@@ -92,7 +51,6 @@ pub enum LogicalPlan {
         /// Maximum number of results
         count: usize,
     },
-
     /// Point lookup by key
     PointLookup {
         /// Collection name
@@ -100,12 +58,18 @@ pub enum LogicalPlan {
         /// Key to look up
         key: Key,
     },
+    /// Two-collection join
+    Join {
+        /// Left input plan
+        left: Box<LogicalPlan>,
+        /// Right input plan
+        right: Box<LogicalPlan>,
+        /// Join condition
+        on: Predicate,
+        /// Join type (Inner / Left / Right)
+        join_type: JoinType,
+    },
 }
-
-// ---------------------------------------------------------------------------
-// Physical plan
-// ---------------------------------------------------------------------------
-
 /// Physical query plan (executable)
 ///
 /// Each variant maps directly to a concrete execution strategy.
@@ -116,7 +80,6 @@ pub enum PhysicalPlan {
         /// Collection to scan
         collection: String,
     },
-
     /// Index/range scan (pushdown to storage layer)
     IndexScan {
         /// Collection to scan
@@ -126,7 +89,6 @@ pub enum PhysicalPlan {
         /// Exclusive end key
         end: Option<Vec<u8>>,
     },
-
     /// FHE filter evaluation (evaluated on encrypted data)
     FheFilter {
         /// Input physical plan
@@ -136,7 +98,6 @@ pub enum PhysicalPlan {
         /// Original predicate (kept for introspection / explain)
         predicate: Predicate,
     },
-
     /// Client-side projection
     Projection {
         /// Input physical plan
@@ -144,7 +105,6 @@ pub enum PhysicalPlan {
         /// Columns to retain
         columns: Vec<String>,
     },
-
     /// Limit result count
     Limit {
         /// Input physical plan
@@ -152,7 +112,6 @@ pub enum PhysicalPlan {
         /// Maximum results
         count: usize,
     },
-
     /// Point lookup by key
     PointGet {
         /// Collection name
@@ -160,12 +119,29 @@ pub enum PhysicalPlan {
         /// Key to look up
         key: Key,
     },
+    /// Nested-loop join — O(n*m), used for encrypted-key / non-Eq predicates
+    NestedLoopJoin {
+        /// Outer (driving) side
+        outer: Box<PhysicalPlan>,
+        /// Build (inner) side iterated for every outer row
+        build: Box<PhysicalPlan>,
+        /// Join condition
+        on: Predicate,
+        /// Join type
+        join_type: JoinType,
+    },
+    /// Hash join — O(n+m), used when the join condition is a single Eq predicate
+    HashJoin {
+        /// Probe side (larger estimated input)
+        probe: Box<PhysicalPlan>,
+        /// Build side hashed into memory (smaller estimated input)
+        build: Box<PhysicalPlan>,
+        /// Join condition (must be Predicate::Eq)
+        on: Predicate,
+        /// Join type
+        join_type: JoinType,
+    },
 }
-
-// ---------------------------------------------------------------------------
-// Cost model
-// ---------------------------------------------------------------------------
-
 /// Cost estimate for a physical plan
 #[derive(Debug, Clone)]
 pub struct PlanCost {
@@ -178,7 +154,6 @@ pub struct PlanCost {
     /// Aggregated scalar cost (lower is better)
     pub total_cost: f64,
 }
-
 impl PlanCost {
     /// Cost weight per byte of I/O
     const IO_COST_PER_BYTE: f64 = 0.001;
@@ -188,7 +163,6 @@ impl PlanCost {
     const SCAN_COST_PER_ROW: f64 = 0.01;
     /// Fixed cost per point lookup
     const POINT_LOOKUP_COST: f64 = 1.0;
-
     /// Compute the total cost from the individual estimates
     fn compute(estimated_rows: u64, estimated_fhe_ops: u64, estimated_io_bytes: u64) -> Self {
         let total_cost = (estimated_rows as f64 * Self::SCAN_COST_PER_ROW)
@@ -202,7 +176,6 @@ impl PlanCost {
         }
     }
 }
-
 impl std::fmt::Display for PlanCost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -212,11 +185,6 @@ impl std::fmt::Display for PlanCost {
         )
     }
 }
-
-// ---------------------------------------------------------------------------
-// Planner statistics
-// ---------------------------------------------------------------------------
-
 /// Statistics used for cost estimation
 ///
 /// Maintains per-collection cardinality estimates and global latency hints
@@ -228,8 +196,11 @@ pub struct PlannerStats {
     pub average_value_size: u64,
     /// Estimated microsecond latency of a single FHE gate operation
     pub fhe_op_latency_us: u64,
+    /// Cost of a single FHE comparison operation (Eq / Lt / Gt / Lte / Gte)
+    pub fhe_comparison_cost: f64,
+    /// Cost of a single FHE boolean operation (And / Or)
+    pub fhe_boolean_cost: f64,
 }
-
 impl PlannerStats {
     /// Create default statistics with reasonable starting values
     fn new() -> Self {
@@ -237,9 +208,10 @@ impl PlannerStats {
             estimated_collection_sizes: DashMap::new(),
             average_value_size: 256,
             fhe_op_latency_us: 1000,
+            fhe_comparison_cost: 100.0,
+            fhe_boolean_cost: 10.0,
         }
     }
-
     /// Return the estimated size of a collection, defaulting to 1000
     fn collection_size(&self, collection: &str) -> u64 {
         self.estimated_collection_sizes
@@ -247,24 +219,61 @@ impl PlannerStats {
             .map(|v| *v)
             .unwrap_or(1000)
     }
-
     /// Update the estimated size for a collection
     pub fn set_collection_size(&self, collection: impl Into<String>, size: u64) {
         self.estimated_collection_sizes
             .insert(collection.into(), size);
     }
+    /// Estimate the fraction of rows a predicate will pass (0.0–1.0).
+    ///
+    /// Heuristics (no histograms available):
+    /// - `Eq`            → 0.001  (high selectivity, rare match)
+    /// - `Lt/Gt/Lte/Gte` → 0.3   (moderate selectivity)
+    /// - `And(p1, p2)`   → s1 * s2
+    /// - `Or(p1, p2)`    → 1 - (1-s1)*(1-s2)
+    /// - `Not(p)`        → 1 - s
+    pub fn predicate_selectivity(&self, pred: &Predicate) -> f64 {
+        match pred {
+            Predicate::Eq(_, _) => 0.001,
+            Predicate::Lt(_, _)
+            | Predicate::Gt(_, _)
+            | Predicate::Lte(_, _)
+            | Predicate::Gte(_, _) => 0.3,
+            Predicate::And(p1, p2) => {
+                self.predicate_selectivity(p1) * self.predicate_selectivity(p2)
+            }
+            Predicate::Or(p1, p2) => {
+                let s1 = self.predicate_selectivity(p1);
+                let s2 = self.predicate_selectivity(p2);
+                1.0 - (1.0 - s1) * (1.0 - s2)
+            }
+            Predicate::Not(inner) => 1.0 - self.predicate_selectivity(inner),
+        }
+    }
+    /// Estimate the relative FHE cost of evaluating a predicate (in abstract units).
+    ///
+    /// - Leaf comparisons (`Eq/Lt/Gt/Lte/Gte`) each cost 1.0 comparison unit.
+    /// - `And`/`Or` cost 1.0 boolean-op + sum of children costs.
+    /// - `Not` costs 0.5 boolean-op + child cost.
+    pub fn predicate_fhe_cost(&self, pred: &Predicate) -> f64 {
+        match pred {
+            Predicate::Eq(_, _)
+            | Predicate::Lt(_, _)
+            | Predicate::Gt(_, _)
+            | Predicate::Lte(_, _)
+            | Predicate::Gte(_, _) => self.fhe_comparison_cost,
+            Predicate::And(p1, p2) | Predicate::Or(p1, p2) => {
+                self.fhe_boolean_cost + self.predicate_fhe_cost(p1) + self.predicate_fhe_cost(p2)
+            }
+            Predicate::Not(inner) => self.fhe_boolean_cost * 0.5 + self.predicate_fhe_cost(inner),
+        }
+    }
 }
-
 impl Default for PlannerStats {
     fn default() -> Self {
         Self::new()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Query Planner
-// ---------------------------------------------------------------------------
-
 /// Query planner that converts `Query` into optimized `PhysicalPlan`
 ///
 /// The planner applies predicate pushdown, filter merging, and cost-based
@@ -278,7 +287,6 @@ pub struct QueryPlanner {
     /// Optional plan cache
     cache: Option<Arc<PlanCache>>,
 }
-
 impl QueryPlanner {
     /// Create a new query planner with default statistics
     pub fn new() -> Self {
@@ -287,28 +295,23 @@ impl QueryPlanner {
             cache: None,
         }
     }
-
     /// Create a planner with custom statistics
     pub fn with_stats(stats: Arc<PlannerStats>) -> Self {
         Self { stats, cache: None }
     }
-
     /// Enable plan caching with the given configuration
     pub fn with_cache(mut self, config: PlanCacheConfig) -> Self {
         self.cache = Some(Arc::new(PlanCache::new(config)));
         self
     }
-
     /// Get a reference to the planner statistics
     pub fn stats(&self) -> &PlannerStats {
         &self.stats
     }
-
     /// Get a reference to the plan cache, if enabled
     pub fn plan_cache(&self) -> Option<&PlanCache> {
         self.cache.as_deref()
     }
-
     /// Return cache statistics, or default stats if caching is not enabled
     pub fn cache_stats(&self) -> CacheStats {
         self.cache
@@ -316,25 +319,18 @@ impl QueryPlanner {
             .map(|c| c.cache_stats())
             .unwrap_or_default()
     }
-
     /// Invalidate all cached plans (e.g., after a schema change)
     pub fn invalidate_all(&self) {
         if let Some(cache) = &self.cache {
             cache.invalidate_all();
         }
     }
-
     /// Invalidate cached plans matching a prefix (e.g., a collection name)
     pub fn invalidate_prefix(&self, prefix: &str) {
         if let Some(cache) = &self.cache {
             cache.invalidate_prefix(prefix);
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Public entry point
-    // -----------------------------------------------------------------------
-
     /// Plan a query
     ///
     /// If caching is enabled, checks the cache first and returns a cached
@@ -342,32 +338,20 @@ impl QueryPlanner {
     /// from scratch and inserts the result into the cache.
     pub fn plan(&self, query: &Query) -> Result<PhysicalPlan> {
         let cache_key = CacheKey::from_query(query);
-
-        // Check cache first
         if let Some(cache) = &self.cache {
             if let Some(cached_plan) = cache.get(&cache_key) {
                 return Ok(cached_plan);
             }
         }
-
-        // Plan from scratch
         let logical = self.to_logical(query)?;
         let optimized = self.optimize_logical(logical);
         let physical = self.to_physical(&optimized)?;
-
-        // Insert into cache
         if let Some(cache) = &self.cache {
             let normalized = CacheKey::normalize(&format!("{:?}", query));
             cache.insert(cache_key, physical.clone(), normalized);
         }
-
         Ok(physical)
     }
-
-    // -----------------------------------------------------------------------
-    // Logical plan construction
-    // -----------------------------------------------------------------------
-
     /// Convert a high-level `Query` into a `LogicalPlan`
     fn to_logical(&self, query: &Query) -> Result<LogicalPlan> {
         match query {
@@ -375,7 +359,6 @@ impl QueryPlanner {
                 collection: collection.clone(),
                 key: key.clone(),
             }),
-
             Query::Filter {
                 collection,
                 predicate,
@@ -385,7 +368,6 @@ impl QueryPlanner {
                 }),
                 predicate: predicate.clone(),
             }),
-
             Query::Range {
                 collection,
                 start,
@@ -395,21 +377,13 @@ impl QueryPlanner {
                 start_key: Some(start.to_vec()),
                 end_key: Some(end.to_vec()),
             }),
-
-            Query::Set { collection, .. } => {
-                // Write operations do not really need a read plan, but we model
-                // them as a point lookup for the target key so that upstream can
-                // check for existence first.
-                Ok(LogicalPlan::Scan {
-                    collection: collection.clone(),
-                })
-            }
-
+            Query::Set { collection, .. } => Ok(LogicalPlan::Scan {
+                collection: collection.clone(),
+            }),
             Query::Delete { collection, key } => Ok(LogicalPlan::PointLookup {
                 collection: collection.clone(),
                 key: key.clone(),
             }),
-
             Query::Update {
                 collection,
                 predicate,
@@ -420,44 +394,138 @@ impl QueryPlanner {
                 }),
                 predicate: predicate.clone(),
             }),
+            Query::Join {
+                left_collection,
+                right_collection,
+                on,
+                join_type,
+                left_limit,
+                right_limit,
+            } => {
+                let mut left: LogicalPlan = LogicalPlan::Scan {
+                    collection: left_collection.clone(),
+                };
+                if let Some(n) = left_limit {
+                    left = LogicalPlan::Limit {
+                        input: Box::new(left),
+                        count: *n,
+                    };
+                }
+                let mut right: LogicalPlan = LogicalPlan::Scan {
+                    collection: right_collection.clone(),
+                };
+                if let Some(n) = right_limit {
+                    right = LogicalPlan::Limit {
+                        input: Box::new(right),
+                        count: *n,
+                    };
+                }
+                Ok(LogicalPlan::Join {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    on: on.clone(),
+                    join_type: join_type.clone(),
+                })
+            }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Logical optimizations
-    // -----------------------------------------------------------------------
-
     /// Apply all logical optimization passes
     fn optimize_logical(&self, plan: LogicalPlan) -> LogicalPlan {
         let plan = self.push_predicates_down(plan);
         let plan = self.merge_filters(plan);
-        self.convert_filter_to_range_scan(plan)
+        let plan = self.convert_filter_to_range_scan(plan);
+        self.reorder_predicates_by_cost(plan)
     }
-
     /// Predicate pushdown: move filters closer to the data source
     ///
     /// Rules applied:
-    /// - `Filter(Project(input, cols), pred)` -> if pred only references
-    ///   columns in `cols`, push the filter below the projection.
+    /// - `Filter(And(p1, p2), input)` (non-Limit input) → split, recurse each conjunct.
+    /// - `Filter(Project(input, cols), pred)` → push the filter below the projection.
+    /// - `Filter(Join{..}, pred)` → push single-side conjuncts into the appropriate join arm.
     /// - `Filter(Filter(input, p1), p2)` is handled by `merge_filters`.
     fn push_predicates_down(&self, plan: LogicalPlan) -> LogicalPlan {
         match plan {
-            // Rule: push filter below projection when possible
+            LogicalPlan::Filter {
+                input,
+                predicate: Predicate::And(p1, p2),
+            } if !matches!(*input, LogicalPlan::Limit { .. }) => {
+                let inner = LogicalPlan::Filter {
+                    input,
+                    predicate: *p2,
+                };
+                let outer = LogicalPlan::Filter {
+                    input: Box::new(inner),
+                    predicate: *p1,
+                };
+                self.push_predicates_down(outer)
+            }
+            LogicalPlan::Filter { input, predicate }
+                if matches!(*input, LogicalPlan::Join { .. }) =>
+            {
+                if let LogicalPlan::Join {
+                    left,
+                    right,
+                    on,
+                    join_type,
+                } = *input
+                {
+                    let left_cols = Self::referenced_columns(&predicate);
+                    let right_input_cols = Self::plan_output_columns(&right);
+                    let left_input_cols = Self::plan_output_columns(&left);
+                    let touches_left = left_cols.iter().any(|c| left_input_cols.contains(c));
+                    let touches_right = left_cols.iter().any(|c| right_input_cols.contains(c));
+                    match (touches_left, touches_right) {
+                        (true, false) => {
+                            let new_left = self.push_predicates_down(LogicalPlan::Filter {
+                                input: left,
+                                predicate,
+                            });
+                            self.push_predicates_down(LogicalPlan::Join {
+                                left: Box::new(new_left),
+                                right,
+                                on,
+                                join_type,
+                            })
+                        }
+                        (false, true) => {
+                            let new_right = self.push_predicates_down(LogicalPlan::Filter {
+                                input: right,
+                                predicate,
+                            });
+                            self.push_predicates_down(LogicalPlan::Join {
+                                left,
+                                right: Box::new(new_right),
+                                on,
+                                join_type,
+                            })
+                        }
+                        _ => {
+                            let joined = self.push_predicates_down(LogicalPlan::Join {
+                                left,
+                                right,
+                                on,
+                                join_type,
+                            });
+                            LogicalPlan::Filter {
+                                input: Box::new(joined),
+                                predicate,
+                            }
+                        }
+                    }
+                } else {
+                    unreachable!("guard confirmed Join variant")
+                }
+            }
             LogicalPlan::Filter { input, predicate } => {
                 let optimized_input = self.push_predicates_down(*input);
-
                 match optimized_input {
-                    // Filter over Project -> check if we can push through
                     LogicalPlan::Project {
                         input: proj_input,
                         columns,
                     } => {
                         let pred_cols = Self::referenced_columns(&predicate);
                         let proj_set: HashSet<&str> = columns.iter().map(|c| c.as_str()).collect();
-
                         if pred_cols.iter().all(|c| proj_set.contains(c.as_str())) {
-                            // All predicate columns exist in the projection,
-                            // so we can push the filter below.
                             LogicalPlan::Project {
                                 input: Box::new(LogicalPlan::Filter {
                                     input: proj_input,
@@ -466,16 +534,12 @@ impl QueryPlanner {
                                 columns,
                             }
                         } else {
-                            // Some columns not in projection; need to widen
-                            // the projection to include predicate columns,
-                            // then re-project afterwards.
                             let mut extended_cols = columns.clone();
                             for col in &pred_cols {
                                 if !proj_set.contains(col.as_str()) {
                                     extended_cols.push(col.clone());
                                 }
                             }
-
                             LogicalPlan::Project {
                                 input: Box::new(LogicalPlan::Filter {
                                     input: Box::new(LogicalPlan::Project {
@@ -488,33 +552,46 @@ impl QueryPlanner {
                             }
                         }
                     }
-
-                    // Filter over Limit: cannot push filter below Limit
-                    // because Limit is a cardinality-changing operation on
-                    // encrypted data where we cannot peek.
                     other => LogicalPlan::Filter {
                         input: Box::new(other),
                         predicate,
                     },
                 }
             }
-
-            // Recurse into other plan nodes
             LogicalPlan::Project { input, columns } => LogicalPlan::Project {
                 input: Box::new(self.push_predicates_down(*input)),
                 columns,
             },
-
             LogicalPlan::Limit { input, count } => LogicalPlan::Limit {
                 input: Box::new(self.push_predicates_down(*input)),
                 count,
             },
-
-            // Leaf nodes are returned unchanged
+            LogicalPlan::Join {
+                left,
+                right,
+                on,
+                join_type,
+            } => LogicalPlan::Join {
+                left: Box::new(self.push_predicates_down(*left)),
+                right: Box::new(self.push_predicates_down(*right)),
+                on,
+                join_type,
+            },
             other => other,
         }
     }
-
+    /// Collect the set of column names that a plan might output.
+    ///
+    /// Used to determine whether a predicate touches columns from a specific
+    /// join arm. For scans we have no schema, so we return an empty set (which
+    /// causes cross-side classification and keeps the filter above the join,
+    /// the safe default).
+    fn plan_output_columns(plan: &LogicalPlan) -> HashSet<String> {
+        match plan {
+            LogicalPlan::Project { columns, .. } => columns.iter().cloned().collect(),
+            _ => HashSet::new(),
+        }
+    }
     /// Merge adjacent filters into a single AND predicate
     ///
     /// `Filter(Filter(input, p1), p2)` => `Filter(input, And(p1, p2))`
@@ -522,39 +599,42 @@ impl QueryPlanner {
         match plan {
             LogicalPlan::Filter { input, predicate } => {
                 let optimized_input = self.merge_filters(*input);
-
                 match optimized_input {
                     LogicalPlan::Filter {
                         input: inner_input,
                         predicate: inner_pred,
-                    } => {
-                        // Merge the two predicates with AND
-                        LogicalPlan::Filter {
-                            input: inner_input,
-                            predicate: Predicate::And(Box::new(inner_pred), Box::new(predicate)),
-                        }
-                    }
+                    } => LogicalPlan::Filter {
+                        input: inner_input,
+                        predicate: Predicate::And(Box::new(inner_pred), Box::new(predicate)),
+                    },
                     other => LogicalPlan::Filter {
                         input: Box::new(other),
                         predicate,
                     },
                 }
             }
-
             LogicalPlan::Project { input, columns } => LogicalPlan::Project {
                 input: Box::new(self.merge_filters(*input)),
                 columns,
             },
-
             LogicalPlan::Limit { input, count } => LogicalPlan::Limit {
                 input: Box::new(self.merge_filters(*input)),
                 count,
             },
-
+            LogicalPlan::Join {
+                left,
+                right,
+                on,
+                join_type,
+            } => LogicalPlan::Join {
+                left: Box::new(self.merge_filters(*left)),
+                right: Box::new(self.merge_filters(*right)),
+                on,
+                join_type,
+            },
             other => other,
         }
     }
-
     /// Convert a filter on key range into a `RangeScan` when possible
     ///
     /// If a `Filter(Scan(collection), pred)` has a predicate that is purely
@@ -564,7 +644,6 @@ impl QueryPlanner {
         match plan {
             LogicalPlan::Filter { input, predicate } => {
                 let optimized_input = self.convert_filter_to_range_scan(*input);
-
                 if let LogicalPlan::Scan { ref collection } = optimized_input {
                     if let Some((start, end)) = Self::extract_key_range(&predicate) {
                         return LogicalPlan::RangeScan {
@@ -574,38 +653,103 @@ impl QueryPlanner {
                         };
                     }
                 }
-
                 LogicalPlan::Filter {
                     input: Box::new(optimized_input),
                     predicate,
                 }
             }
-
             LogicalPlan::Project { input, columns } => LogicalPlan::Project {
                 input: Box::new(self.convert_filter_to_range_scan(*input)),
                 columns,
             },
-
             LogicalPlan::Limit { input, count } => LogicalPlan::Limit {
                 input: Box::new(self.convert_filter_to_range_scan(*input)),
                 count,
             },
-
+            LogicalPlan::Join {
+                left,
+                right,
+                on,
+                join_type,
+            } => LogicalPlan::Join {
+                left: Box::new(self.convert_filter_to_range_scan(*left)),
+                right: Box::new(self.convert_filter_to_range_scan(*right)),
+                on,
+                join_type,
+            },
             other => other,
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Physical plan construction
-    // -----------------------------------------------------------------------
-
+    /// Reorder conjuncts in `And` predicates so the cheaper (lower
+    /// selectivity × fhe_cost) predicate is evaluated first (outer And-branch).
+    ///
+    /// This is a pure structural rewrite; semantics are unchanged because AND
+    /// is commutative.
+    fn reorder_predicates_by_cost(&self, plan: LogicalPlan) -> LogicalPlan {
+        match plan {
+            LogicalPlan::Filter { input, predicate } => {
+                let reordered_pred = self.reorder_pred(&predicate);
+                let optimized_input = self.reorder_predicates_by_cost(*input);
+                LogicalPlan::Filter {
+                    input: Box::new(optimized_input),
+                    predicate: reordered_pred,
+                }
+            }
+            LogicalPlan::Project { input, columns } => LogicalPlan::Project {
+                input: Box::new(self.reorder_predicates_by_cost(*input)),
+                columns,
+            },
+            LogicalPlan::Limit { input, count } => LogicalPlan::Limit {
+                input: Box::new(self.reorder_predicates_by_cost(*input)),
+                count,
+            },
+            LogicalPlan::Join {
+                left,
+                right,
+                on,
+                join_type,
+            } => {
+                let reordered_on = self.reorder_pred(&on);
+                LogicalPlan::Join {
+                    left: Box::new(self.reorder_predicates_by_cost(*left)),
+                    right: Box::new(self.reorder_predicates_by_cost(*right)),
+                    on: reordered_on,
+                    join_type,
+                }
+            }
+            other => other,
+        }
+    }
+    /// Recursively reorder `And` sub-predicates cheapest-first.
+    fn reorder_pred(&self, pred: &Predicate) -> Predicate {
+        match pred {
+            Predicate::And(p1, p2) => {
+                let r1 = self.reorder_pred(p1);
+                let r2 = self.reorder_pred(p2);
+                let cost1 =
+                    self.stats.predicate_selectivity(&r1) * self.stats.predicate_fhe_cost(&r1);
+                let cost2 =
+                    self.stats.predicate_selectivity(&r2) * self.stats.predicate_fhe_cost(&r2);
+                if cost1 <= cost2 {
+                    Predicate::And(Box::new(r1), Box::new(r2))
+                } else {
+                    Predicate::And(Box::new(r2), Box::new(r1))
+                }
+            }
+            Predicate::Or(p1, p2) => Predicate::Or(
+                Box::new(self.reorder_pred(p1)),
+                Box::new(self.reorder_pred(p2)),
+            ),
+            Predicate::Not(inner) => Predicate::Not(Box::new(self.reorder_pred(inner))),
+            other => other.clone(),
+        }
+    }
     /// Convert an optimized logical plan into a physical plan
     fn to_physical(&self, plan: &LogicalPlan) -> Result<PhysicalPlan> {
         match plan {
             LogicalPlan::Scan { collection } => Ok(PhysicalPlan::SeqScan {
                 collection: collection.clone(),
             }),
-
             LogicalPlan::RangeScan {
                 collection,
                 start_key,
@@ -615,18 +759,15 @@ impl QueryPlanner {
                 start: start_key.clone(),
                 end: end_key.clone(),
             }),
-
             LogicalPlan::Filter { input, predicate } => {
                 let physical_input = self.to_physical(input)?;
                 let circuit = self.compile_predicate_circuit(predicate)?;
-
                 Ok(PhysicalPlan::FheFilter {
                     input: Box::new(physical_input),
                     circuit,
                     predicate: predicate.clone(),
                 })
             }
-
             LogicalPlan::Project { input, columns } => {
                 let physical_input = self.to_physical(input)?;
                 Ok(PhysicalPlan::Projection {
@@ -634,7 +775,6 @@ impl QueryPlanner {
                     columns: columns.clone(),
                 })
             }
-
             LogicalPlan::Limit { input, count } => {
                 let physical_input = self.to_physical(input)?;
                 Ok(PhysicalPlan::Limit {
@@ -642,18 +782,49 @@ impl QueryPlanner {
                     count: *count,
                 })
             }
-
             LogicalPlan::PointLookup { collection, key } => Ok(PhysicalPlan::PointGet {
                 collection: collection.clone(),
                 key: key.clone(),
             }),
+            LogicalPlan::Join {
+                left,
+                right,
+                on,
+                join_type,
+            } => {
+                let left_phys = self.to_physical(left)?;
+                let right_phys = self.to_physical(right)?;
+                let left_rows = self.estimate_cost(&left_phys).estimated_rows;
+                let right_rows = self.estimate_cost(&right_phys).estimated_rows;
+                let use_hash = matches!(on, Predicate::Eq(_, _));
+                if use_hash {
+                    let (probe, build) = if left_rows <= right_rows {
+                        (right_phys, left_phys)
+                    } else {
+                        (left_phys, right_phys)
+                    };
+                    Ok(PhysicalPlan::HashJoin {
+                        probe: Box::new(probe),
+                        build: Box::new(build),
+                        on: on.clone(),
+                        join_type: join_type.clone(),
+                    })
+                } else {
+                    let (outer, build) = if left_rows <= right_rows {
+                        (left_phys, right_phys)
+                    } else {
+                        (right_phys, left_phys)
+                    };
+                    Ok(PhysicalPlan::NestedLoopJoin {
+                        outer: Box::new(outer),
+                        build: Box::new(build),
+                        on: on.clone(),
+                        join_type: join_type.clone(),
+                    })
+                }
+            }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Cost estimation
-    // -----------------------------------------------------------------------
-
     /// Estimate the cost of a physical plan
     pub fn estimate_cost(&self, plan: &PhysicalPlan) -> PlanCost {
         match plan {
@@ -662,16 +833,12 @@ impl QueryPlanner {
                 let io_bytes = rows * self.stats.average_value_size;
                 PlanCost::compute(rows, 0, io_bytes)
             }
-
             PhysicalPlan::IndexScan {
                 collection,
                 start,
                 end,
             } => {
                 let total = self.stats.collection_size(collection);
-                // Estimate selectivity: a range scan typically touches a fraction.
-                // Without histograms we use a heuristic: if both bounds present
-                // assume 10%, one bound 30%, no bounds = full scan.
                 let selectivity = match (start, end) {
                     (Some(_), Some(_)) => 0.10,
                     (Some(_), None) | (None, Some(_)) => 0.30,
@@ -681,12 +848,9 @@ impl QueryPlanner {
                 let io_bytes = rows * self.stats.average_value_size;
                 PlanCost::compute(rows, 0, io_bytes)
             }
-
             PhysicalPlan::FheFilter { input, circuit, .. } => {
                 let input_cost = self.estimate_cost(input);
-                // FHE filter applies the circuit to every row from the input
                 let fhe_ops = input_cost.estimated_rows * (circuit.gate_count as u64);
-                // After filter, assume 50% selectivity without better stats
                 let output_rows = (input_cost.estimated_rows / 2).max(1);
                 let io_bytes = output_rows * self.stats.average_value_size;
                 PlanCost::compute(
@@ -695,31 +859,43 @@ impl QueryPlanner {
                     input_cost.estimated_io_bytes + io_bytes,
                 )
             }
-
             PhysicalPlan::Projection { input, .. } => {
-                // Projection is cheap; just trim columns
                 let mut cost = self.estimate_cost(input);
-                // Slightly reduce IO since we return fewer bytes
                 cost.estimated_io_bytes = (cost.estimated_io_bytes as f64 * 0.8) as u64;
                 cost.total_cost = (cost.estimated_rows as f64 * PlanCost::SCAN_COST_PER_ROW)
                     + (cost.estimated_fhe_ops as f64 * PlanCost::FHE_COST_PER_OP)
                     + (cost.estimated_io_bytes as f64 * PlanCost::IO_COST_PER_BYTE);
                 cost
             }
-
             PhysicalPlan::Limit { input, count } => {
                 let input_cost = self.estimate_cost(input);
                 let rows = (*count as u64).min(input_cost.estimated_rows);
                 let io_bytes = rows * self.stats.average_value_size;
-                // Note: FHE ops from input still happen because we do not know
-                // which rows will survive until after FHE evaluation.
                 PlanCost::compute(rows, input_cost.estimated_fhe_ops, io_bytes)
             }
-
             PhysicalPlan::PointGet { .. } => PlanCost::compute(1, 0, self.stats.average_value_size),
+            PhysicalPlan::NestedLoopJoin { outer, build, .. } => {
+                let outer_cost = self.estimate_cost(outer);
+                let build_cost = self.estimate_cost(build);
+                let outer_rows = outer_cost.estimated_rows;
+                let build_rows = build_cost.estimated_rows;
+                let fhe_ops = outer_rows.saturating_mul(build_rows);
+                let estimated_rows = outer_rows.saturating_mul(build_rows) / 2;
+                let io_bytes = outer_cost.estimated_io_bytes + build_cost.estimated_io_bytes;
+                PlanCost::compute(estimated_rows, fhe_ops, io_bytes)
+            }
+            PhysicalPlan::HashJoin { probe, build, .. } => {
+                let probe_cost = self.estimate_cost(probe);
+                let build_cost = self.estimate_cost(build);
+                let probe_rows = probe_cost.estimated_rows;
+                let build_rows = build_cost.estimated_rows;
+                let fhe_ops = probe_cost.estimated_fhe_ops + build_cost.estimated_fhe_ops;
+                let estimated_rows = probe_rows.saturating_mul(build_rows) / 2;
+                let io_bytes = probe_cost.estimated_io_bytes + build_cost.estimated_io_bytes;
+                PlanCost::compute(estimated_rows, fhe_ops, io_bytes)
+            }
         }
     }
-
     /// Compare two physical plans by cost and return the cheaper one
     pub fn choose_cheaper<'a>(&self, a: &'a PhysicalPlan, b: &'a PhysicalPlan) -> &'a PhysicalPlan {
         let cost_a = self.estimate_cost(a);
@@ -730,11 +906,6 @@ impl QueryPlanner {
             b
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
     /// Extract all column names referenced in a predicate
     fn referenced_columns(predicate: &Predicate) -> Vec<String> {
         let mut cols = Vec::new();
@@ -743,7 +914,6 @@ impl QueryPlanner {
         cols.dedup();
         cols
     }
-
     fn collect_columns(predicate: &Predicate, out: &mut Vec<String>) {
         match predicate {
             Predicate::Eq(col, _)
@@ -762,7 +932,6 @@ impl QueryPlanner {
             }
         }
     }
-
     /// Try to extract a key range from a predicate on the `_key` column
     ///
     /// Returns `Some((start, end))` where either bound may be `None`.
@@ -782,10 +951,8 @@ impl QueryPlanner {
                 Some((None, Some(blob.as_bytes().to_vec())))
             }
             Predicate::And(left, right) => {
-                // Combine two half-ranges
                 let lr = Self::extract_key_range(left);
                 let rr = Self::extract_key_range(right);
-
                 match (lr, rr) {
                     (Some((s1, e1)), Some((s2, e2))) => {
                         let start = s1.or(s2);
@@ -799,32 +966,22 @@ impl QueryPlanner {
             _ => None,
         }
     }
-
     /// Compile a predicate into an FHE circuit
     fn compile_predicate_circuit(&self, predicate: &Predicate) -> Result<Circuit> {
         let mut compiler = PredicateCompiler::new();
-        // Default to U8 type for now; in a full implementation the type
-        // would be inferred from schema metadata.
         compiler.compile(predicate, EncryptedType::U8)
     }
 }
-
 impl Default for QueryPlanner {
     fn default() -> Self {
         Self::new()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Display implementations for explain/debugging
-// ---------------------------------------------------------------------------
-
 impl std::fmt::Display for LogicalPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.fmt_indented(f, 0)
     }
 }
-
 impl LogicalPlan {
     fn fmt_indented(&self, f: &mut std::fmt::Formatter<'_>, indent: usize) -> std::fmt::Result {
         let pad = "  ".repeat(indent);
@@ -861,16 +1018,29 @@ impl LogicalPlan {
             LogicalPlan::PointLookup { collection, key } => {
                 writeln!(f, "{}PointLookup({}, key={})", pad, collection, key)
             }
+            LogicalPlan::Join {
+                left,
+                right,
+                on,
+                join_type,
+            } => {
+                let jt = match join_type {
+                    JoinType::Inner => "Inner",
+                    JoinType::Left => "Left",
+                    JoinType::Right => "Right",
+                };
+                writeln!(f, "{}{}Join(on={:?})", pad, jt, on)?;
+                left.fmt_indented(f, indent + 1)?;
+                right.fmt_indented(f, indent + 1)
+            }
         }
     }
 }
-
 impl std::fmt::Display for PhysicalPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.fmt_indented(f, 0)
     }
 }
-
 impl PhysicalPlan {
     fn fmt_indented(&self, f: &mut std::fmt::Formatter<'_>, indent: usize) -> std::fmt::Result {
         let pad = "  ".repeat(indent);
@@ -909,462 +1079,39 @@ impl PhysicalPlan {
             PhysicalPlan::PointGet { collection, key } => {
                 writeln!(f, "{}PointGet({}, key={})", pad, collection, key)
             }
+            PhysicalPlan::NestedLoopJoin {
+                outer,
+                build,
+                on,
+                join_type,
+            } => {
+                let jt = match join_type {
+                    JoinType::Inner => "Inner",
+                    JoinType::Left => "Left",
+                    JoinType::Right => "Right",
+                };
+                writeln!(f, "{}NestedLoopJoin[{}](on={:?})", pad, jt, on)?;
+                outer.fmt_indented(f, indent + 1)?;
+                build.fmt_indented(f, indent + 1)
+            }
+            PhysicalPlan::HashJoin {
+                probe,
+                build,
+                on,
+                join_type,
+            } => {
+                let jt = match join_type {
+                    JoinType::Inner => "Inner",
+                    JoinType::Left => "Left",
+                    JoinType::Right => "Right",
+                };
+                writeln!(f, "{}HashJoin[{}](on={:?})", pad, jt, on)?;
+                probe.fmt_indented(f, indent + 1)?;
+                build.fmt_indented(f, indent + 1)
+            }
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::col;
-
-    fn make_blob(v: u8) -> CipherBlob {
-        CipherBlob::new(vec![v])
-    }
-
-    // -- Basic planning tests -----------------------------------------------
-
-    #[test]
-    fn test_scan_plan() -> Result<()> {
-        let planner = QueryPlanner::new();
-        let query = Query::Filter {
-            collection: "users".to_string(),
-            predicate: Predicate::Gt(col("age"), make_blob(18)),
-        };
-
-        let plan = planner.plan(&query)?;
-
-        // Should produce FheFilter over SeqScan because "age" is not "_key"
-        match &plan {
-            PhysicalPlan::FheFilter { input, .. } => {
-                assert!(matches!(input.as_ref(), PhysicalPlan::SeqScan { .. }));
-            }
-            other => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
-                    "Expected FheFilter, got: {:?}",
-                    other
-                ))));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_range_scan_pushdown() -> Result<()> {
-        let planner = QueryPlanner::new();
-
-        // Filter on _key column should convert to IndexScan
-        let query = Query::Filter {
-            collection: "data".to_string(),
-            predicate: Predicate::And(
-                Box::new(Predicate::Gte(col("_key"), make_blob(10))),
-                Box::new(Predicate::Lt(col("_key"), make_blob(50))),
-            ),
-        };
-
-        let plan = planner.plan(&query)?;
-
-        match &plan {
-            PhysicalPlan::IndexScan {
-                collection,
-                start,
-                end,
-            } => {
-                assert_eq!(collection, "data");
-                assert!(start.is_some());
-                assert!(end.is_some());
-            }
-            other => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
-                    "Expected IndexScan, got: {:?}",
-                    other
-                ))));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_predicate_pushdown() -> Result<()> {
-        let planner = QueryPlanner::new();
-
-        // Construct: Filter(Project(Scan, [age]), pred_on_age)
-        // The filter should be pushed below the projection.
-        let scan = LogicalPlan::Scan {
-            collection: "users".to_string(),
-        };
-        let project = LogicalPlan::Project {
-            input: Box::new(scan),
-            columns: vec!["age".to_string(), "name".to_string()],
-        };
-        let filter = LogicalPlan::Filter {
-            input: Box::new(project),
-            predicate: Predicate::Gt(col("age"), make_blob(18)),
-        };
-
-        let optimized = planner.push_predicates_down(filter);
-
-        // After pushdown: Project([age, name], Filter(Scan, pred))
-        match &optimized {
-            LogicalPlan::Project { input, columns } => {
-                assert!(columns.contains(&"age".to_string()));
-                assert!(matches!(input.as_ref(), LogicalPlan::Filter { .. }));
-            }
-            other => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
-                    "Expected Project, got: {:?}",
-                    other
-                ))));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_filter_merge() -> Result<()> {
-        let planner = QueryPlanner::new();
-
-        // Construct: Filter(Filter(Scan, p1), p2) -> Filter(Scan, And(p1, p2))
-        let scan = LogicalPlan::Scan {
-            collection: "users".to_string(),
-        };
-        let filter1 = LogicalPlan::Filter {
-            input: Box::new(scan),
-            predicate: Predicate::Gt(col("age"), make_blob(18)),
-        };
-        let filter2 = LogicalPlan::Filter {
-            input: Box::new(filter1),
-            predicate: Predicate::Lt(col("age"), make_blob(65)),
-        };
-
-        let optimized = planner.merge_filters(filter2);
-
-        match &optimized {
-            LogicalPlan::Filter { input, predicate } => {
-                // Should be a single filter with AND predicate
-                assert!(matches!(predicate, Predicate::And(_, _)));
-                // Input should be Scan, not another Filter
-                assert!(matches!(input.as_ref(), LogicalPlan::Scan { .. }));
-            }
-            other => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
-                    "Expected Filter, got: {:?}",
-                    other
-                ))));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_cost_estimation() -> Result<()> {
-        let planner = QueryPlanner::new();
-        planner.stats().set_collection_size("data", 10_000);
-
-        // Full scan cost
-        let seq_scan = PhysicalPlan::SeqScan {
-            collection: "data".to_string(),
-        };
-        let seq_cost = planner.estimate_cost(&seq_scan);
-
-        // Index scan cost (should be cheaper)
-        let idx_scan = PhysicalPlan::IndexScan {
-            collection: "data".to_string(),
-            start: Some(vec![10]),
-            end: Some(vec![50]),
-        };
-        let idx_cost = planner.estimate_cost(&idx_scan);
-
-        // Index scan should be cheaper than full scan
-        assert!(
-            idx_cost.total_cost < seq_cost.total_cost,
-            "IndexScan cost ({}) should be less than SeqScan cost ({})",
-            idx_cost.total_cost,
-            seq_cost.total_cost,
-        );
-
-        // Point get should be the cheapest
-        let point = PhysicalPlan::PointGet {
-            collection: "data".to_string(),
-            key: Key::from_str("k"),
-        };
-        let point_cost = planner.estimate_cost(&point);
-        assert!(
-            point_cost.total_cost < idx_cost.total_cost,
-            "PointGet cost ({}) should be less than IndexScan cost ({})",
-            point_cost.total_cost,
-            idx_cost.total_cost,
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_limit_planning() -> Result<()> {
-        let planner = QueryPlanner::new();
-
-        // Build a filter query and wrap with Limit via logical plan
-        let scan = LogicalPlan::Scan {
-            collection: "logs".to_string(),
-        };
-        let filter = LogicalPlan::Filter {
-            input: Box::new(scan),
-            predicate: Predicate::Eq(col("level"), make_blob(1)),
-        };
-        let limited = LogicalPlan::Limit {
-            input: Box::new(filter),
-            count: 10,
-        };
-
-        let physical = planner.to_physical(&limited)?;
-
-        // Limit should be on top
-        match &physical {
-            PhysicalPlan::Limit { input, count } => {
-                assert_eq!(*count, 10);
-                assert!(matches!(input.as_ref(), PhysicalPlan::FheFilter { .. }));
-            }
-            other => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
-                    "Expected Limit, got: {:?}",
-                    other
-                ))));
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_plan_with_fhe_filter() -> Result<()> {
-        let planner = QueryPlanner::new();
-        let query = Query::Filter {
-            collection: "accounts".to_string(),
-            predicate: Predicate::And(
-                Box::new(Predicate::Gt(col("balance"), make_blob(100))),
-                Box::new(Predicate::Lt(col("balance"), make_blob(200))),
-            ),
-        };
-
-        let plan = planner.plan(&query)?;
-
-        // Should have an FheFilter with a compiled circuit
-        match &plan {
-            PhysicalPlan::FheFilter { circuit, .. } => {
-                // The circuit should have gate_count > 0 for AND of two comparisons
-                assert!(circuit.gate_count > 0);
-                assert_eq!(circuit.result_type, EncryptedType::Bool);
-            }
-            other => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
-                    "Expected FheFilter, got: {:?}",
-                    other
-                ))));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_complex_plan() -> Result<()> {
-        let planner = QueryPlanner::new();
-        planner.stats().set_collection_size("orders", 50_000);
-
-        // Complex query: Filter with non-key predicate -> should remain FheFilter
-        let query = Query::Filter {
-            collection: "orders".to_string(),
-            predicate: Predicate::Or(
-                Box::new(Predicate::Eq(col("status"), make_blob(1))),
-                Box::new(Predicate::And(
-                    Box::new(Predicate::Gt(col("amount"), make_blob(100))),
-                    Box::new(Predicate::Lt(col("amount"), make_blob(255))),
-                )),
-            ),
-        };
-
-        let plan = planner.plan(&query)?;
-        let cost = planner.estimate_cost(&plan);
-
-        // Should have a non-trivial cost due to FHE ops
-        assert!(cost.estimated_fhe_ops > 0);
-        assert!(cost.total_cost > 0.0);
-
-        // Verify display works
-        let plan_str = format!("{}", plan);
-        assert!(!plan_str.is_empty());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_query_planning() -> Result<()> {
-        let planner = QueryPlanner::new();
-        let query = Query::Get {
-            collection: "users".to_string(),
-            key: Key::from_str("user:42"),
-        };
-
-        let plan = planner.plan(&query)?;
-
-        match &plan {
-            PhysicalPlan::PointGet { collection, key } => {
-                assert_eq!(collection, "users");
-                assert_eq!(key.to_string_lossy(), "user:42");
-            }
-            other => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
-                    "Expected PointGet, got: {:?}",
-                    other
-                ))));
-            }
-        }
-
-        let cost = planner.estimate_cost(&plan);
-        assert_eq!(cost.estimated_rows, 1);
-        assert_eq!(cost.estimated_fhe_ops, 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_range_query_planning() -> Result<()> {
-        let planner = QueryPlanner::new();
-        let query = Query::Range {
-            collection: "events".to_string(),
-            start: Key::from_str("2024-01"),
-            end: Key::from_str("2024-12"),
-        };
-
-        let plan = planner.plan(&query)?;
-
-        match &plan {
-            PhysicalPlan::IndexScan {
-                collection,
-                start,
-                end,
-            } => {
-                assert_eq!(collection, "events");
-                assert!(start.is_some());
-                assert!(end.is_some());
-            }
-            other => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
-                    "Expected IndexScan, got: {:?}",
-                    other
-                ))));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_cost_comparison() -> Result<()> {
-        let planner = QueryPlanner::new();
-        planner.stats().set_collection_size("items", 100_000);
-
-        let scan = PhysicalPlan::SeqScan {
-            collection: "items".to_string(),
-        };
-
-        let idx = PhysicalPlan::IndexScan {
-            collection: "items".to_string(),
-            start: Some(vec![1]),
-            end: Some(vec![10]),
-        };
-
-        let cheaper = planner.choose_cheaper(&scan, &idx);
-
-        // IndexScan should win
-        assert!(matches!(cheaper, PhysicalPlan::IndexScan { .. }));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_filter_not_pushed_below_limit() -> Result<()> {
-        let planner = QueryPlanner::new();
-
-        // Filter(Limit(Scan, 10), pred) -> Filter should stay on top
-        let scan = LogicalPlan::Scan {
-            collection: "data".to_string(),
-        };
-        let limited = LogicalPlan::Limit {
-            input: Box::new(scan),
-            count: 10,
-        };
-        let filter = LogicalPlan::Filter {
-            input: Box::new(limited),
-            predicate: Predicate::Gt(col("x"), make_blob(5)),
-        };
-
-        let optimized = planner.push_predicates_down(filter);
-
-        // Filter should remain on top of Limit
-        match &optimized {
-            LogicalPlan::Filter { input, .. } => {
-                assert!(matches!(input.as_ref(), LogicalPlan::Limit { .. }));
-            }
-            other => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(format!(
-                    "Expected Filter on top, got: {:?}",
-                    other
-                ))));
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_stats_update() {
-        let planner = QueryPlanner::new();
-        planner.stats().set_collection_size("big_table", 1_000_000);
-
-        let size = planner.stats().collection_size("big_table");
-        assert_eq!(size, 1_000_000);
-
-        // Unknown collection should default to 1000
-        let default_size = planner.stats().collection_size("unknown");
-        assert_eq!(default_size, 1000);
-    }
-
-    #[test]
-    fn test_referenced_columns() {
-        let pred = Predicate::And(
-            Box::new(Predicate::Gt(col("age"), make_blob(18))),
-            Box::new(Predicate::Or(
-                Box::new(Predicate::Lt(col("salary"), make_blob(100))),
-                Box::new(Predicate::Eq(col("age"), make_blob(30))),
-            )),
-        );
-
-        let cols = QueryPlanner::referenced_columns(&pred);
-        assert_eq!(cols, vec!["age".to_string(), "salary".to_string()]);
-    }
-
-    #[test]
-    fn test_display_plan_cost() {
-        let cost = PlanCost::compute(1000, 50, 256_000);
-        let display = format!("{}", cost);
-        assert!(display.contains("1000"));
-        assert!(display.contains("50"));
-    }
-
-    #[test]
-    fn test_logical_plan_display() {
-        let plan = LogicalPlan::Filter {
-            input: Box::new(LogicalPlan::Scan {
-                collection: "t".to_string(),
-            }),
-            predicate: Predicate::Eq(col("x"), make_blob(1)),
-        };
-
-        let s = format!("{}", plan);
-        assert!(s.contains("Filter"));
-        assert!(s.contains("Scan"));
-    }
-}
+mod tests;

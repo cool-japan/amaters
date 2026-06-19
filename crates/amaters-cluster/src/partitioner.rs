@@ -7,7 +7,6 @@ use crate::error::{RaftError, RaftResult};
 use crate::shard::{KeyRange, ShardId, ShardMetadata, ShardRegistry};
 use crate::types::NodeId;
 use amaters_core::Key;
-use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -30,6 +29,73 @@ fn hash_key(key: &Key) -> u64 {
     hasher.finish()
 }
 
+/// A maintained consistent hash ring backed by a `BTreeMap`.
+///
+/// Virtual nodes for each shard are inserted at construction and maintained
+/// incrementally via `add_shard`/`remove_shard`, avoiding the O(S·V·log(S·V))
+/// rebuild on every lookup.
+#[derive(Clone)]
+pub struct HashRing {
+    /// Sorted map from virtual-node hash → ShardId.
+    ring: std::collections::BTreeMap<u64, ShardId>,
+    /// Number of virtual nodes per shard.
+    virtual_nodes: usize,
+}
+
+impl HashRing {
+    /// Create an empty ring with the given number of virtual nodes per shard.
+    pub fn new(virtual_nodes: usize) -> Self {
+        Self {
+            ring: std::collections::BTreeMap::new(),
+            virtual_nodes,
+        }
+    }
+
+    /// Insert `virtual_nodes` entries for the given shard.
+    pub fn add_shard(&mut self, id: ShardId) {
+        for i in 0..self.virtual_nodes {
+            let hash = Self::virtual_node_hash(id, i);
+            self.ring.insert(hash, id);
+        }
+    }
+
+    /// Remove all virtual-node entries for the given shard.
+    pub fn remove_shard(&mut self, id: ShardId) {
+        for i in 0..self.virtual_nodes {
+            let hash = Self::virtual_node_hash(id, i);
+            // Only remove if this slot still maps to our shard (no hash collision replacement).
+            if self.ring.get(&hash) == Some(&id) {
+                self.ring.remove(&hash);
+            }
+        }
+    }
+
+    /// Route a key to the responsible shard.
+    ///
+    /// Returns `None` if the ring is empty.
+    pub fn get_shard_for_key(&self, key: &Key) -> Option<ShardId> {
+        if self.ring.is_empty() {
+            return None;
+        }
+        let key_hash = hash_key(key);
+        // Find the first virtual node with hash >= key_hash (successor).
+        self.ring
+            .range(key_hash..)
+            .next()
+            .or_else(|| self.ring.iter().next()) // wrap-around to first entry
+            .map(|(_, &id)| id)
+    }
+
+    /// Hash function for virtual node `(shard_id, i)`.
+    fn virtual_node_hash(shard_id: ShardId, i: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let virtual_key = format!("{}:{}", shard_id, i);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        virtual_key.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 /// Partitioner handles key-to-shard routing
 #[derive(Clone)]
 pub struct Partitioner {
@@ -39,21 +105,35 @@ pub struct Partitioner {
     strategy: PartitionStrategy,
     /// Number of virtual nodes for consistent hashing
     virtual_nodes: usize,
+    /// Maintained consistent hash ring (initialized from registry at construction).
+    hash_ring: HashRing,
 }
 
 impl Partitioner {
     /// Create a new partitioner
     pub fn new(registry: Arc<ShardRegistry>, strategy: PartitionStrategy) -> Self {
+        let virtual_nodes = 100;
+        let mut hash_ring = HashRing::new(virtual_nodes);
+        for shard in registry.get_all() {
+            hash_ring.add_shard(shard.id);
+        }
         Self {
             registry,
             strategy,
-            virtual_nodes: 100, // Default number of virtual nodes
+            virtual_nodes,
+            hash_ring,
         }
     }
 
     /// Set the number of virtual nodes for consistent hashing
     pub fn with_virtual_nodes(mut self, count: usize) -> Self {
         self.virtual_nodes = count;
+        // Rebuild the hash ring with the new virtual node count.
+        let mut new_ring = HashRing::new(count);
+        for shard in self.registry.get_all() {
+            new_ring.add_shard(shard.id);
+        }
+        self.hash_ring = new_ring;
         self
     }
 
@@ -89,42 +169,20 @@ impl Partitioner {
         Ok(shards[index].clone())
     }
 
-    /// Route by consistent hashing
+    /// Route by consistent hashing using the maintained hash ring.
     fn route_by_consistent_hash(&self, key: &Key) -> RaftResult<ShardMetadata> {
-        let shards = self.registry.get_all();
-        if shards.is_empty() {
-            return Err(RaftError::ConfigError {
-                message: "No shards available".to_string(),
-            });
-        }
+        let shard_id =
+            self.hash_ring
+                .get_shard_for_key(key)
+                .ok_or_else(|| RaftError::ConfigError {
+                    message: "Consistent hash ring is empty — no shards registered".to_string(),
+                })?;
 
-        // Build hash ring
-        let mut ring: Vec<(u64, ShardId)> = Vec::new();
-        for shard in &shards {
-            for i in 0..self.virtual_nodes {
-                let virtual_key = format!("{}:{}", shard.id, i);
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                virtual_key.hash(&mut hasher);
-                let hash = hasher.finish();
-                ring.push((hash, shard.id));
-            }
-        }
-        ring.sort_by_key(|&(hash, _)| hash);
-
-        // Find the shard for this key (wrap around to first entry if key_hash exceeds all ring entries)
-        let key_hash = hash_key(key);
-        let shard_id = ring
-            .iter()
-            .find(|&&(hash, _)| hash >= key_hash)
-            .or_else(|| ring.first())
-            .map(|&(_, id)| id)
+        self.registry
+            .get(shard_id)
             .ok_or_else(|| RaftError::ConfigError {
-                message: "Consistent hash ring is empty".to_string(),
-            })?;
-
-        self.registry.get(shard_id).ok_or_else(|| RaftError::ConfigError {
-            message: format!("Shard {} not found in registry", shard_id),
-        })
+                message: format!("Shard {} not found in registry", shard_id),
+            })
     }
 
     /// Route a key range query to all relevant shards
@@ -183,10 +241,7 @@ impl QueryRouter {
 
         let mut targets: HashMap<NodeId, Vec<ShardId>> = HashMap::new();
         for shard in shards {
-            targets
-                .entry(shard.node_id)
-                .or_insert_with(Vec::new)
-                .push(shard.id);
+            targets.entry(shard.node_id).or_default().push(shard.id);
         }
 
         Ok(QueryPlan::Scatter {
@@ -206,10 +261,7 @@ impl QueryRouter {
 
         let mut targets: HashMap<NodeId, Vec<ShardId>> = HashMap::new();
         for shard in shards {
-            targets
-                .entry(shard.node_id)
-                .or_insert_with(Vec::new)
-                .push(shard.id);
+            targets.entry(shard.node_id).or_default().push(shard.id);
         }
 
         Ok(QueryPlan::Scatter {
@@ -269,9 +321,7 @@ impl QueryPlan {
     pub fn get_shards(&self) -> Vec<ShardId> {
         match self {
             QueryPlan::Single { shard_id, .. } => vec![*shard_id],
-            QueryPlan::Scatter { targets, .. } => {
-                targets.values().flatten().copied().collect()
-            }
+            QueryPlan::Scatter { targets, .. } => targets.values().flatten().copied().collect(),
         }
     }
 
@@ -323,6 +373,64 @@ impl QueryStats {
         } else {
             self.total_shards as f64 / self.total_nodes as f64
         }
+    }
+}
+
+/// Range-based partitioner backed by a sorted `BTreeMap`.
+///
+/// Maps key-space ranges to shards via range-start bytes.  Each shard owns
+/// the half-open interval `[start, next_start)`.  The shard whose range start
+/// is the largest value ≤ the lookup key is selected.
+pub struct RangePartitioner {
+    /// BTreeMap from range-start bytes (inclusive) → ShardId.
+    /// The owning shard covers [start, next_start).
+    ranges: std::collections::BTreeMap<Vec<u8>, ShardId>,
+}
+
+impl RangePartitioner {
+    /// Create an empty range partitioner.
+    pub fn new() -> Self {
+        Self {
+            ranges: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Register a shard that owns the range starting at `start` (inclusive).
+    pub fn add_range(&mut self, start: Vec<u8>, shard_id: ShardId) {
+        self.ranges.insert(start, shard_id);
+    }
+
+    /// Remove the range entry whose start equals `start`.
+    pub fn remove_range(&mut self, start: &[u8]) {
+        self.ranges.remove(start);
+    }
+
+    /// Route a key to its responsible shard.
+    ///
+    /// Finds the shard whose range start is the greatest value ≤ the key.
+    /// Returns `None` if no range covers the key (i.e., key is before all ranges).
+    pub fn get_shard_for_key(&self, key: &Key) -> Option<ShardId> {
+        let key_bytes = key.as_bytes().to_vec();
+        self.ranges
+            .range(..=key_bytes)
+            .next_back()
+            .map(|(_, &id)| id)
+    }
+
+    /// Build a `RangePartitioner` from a `ShardRegistry`, using each shard's
+    /// range start as the routing key.
+    pub fn from_registry(registry: &ShardRegistry) -> Self {
+        let mut rp = Self::new();
+        for shard in registry.get_all() {
+            rp.add_range(shard.range.start.as_bytes().to_vec(), shard.id);
+        }
+        rp
+    }
+}
+
+impl Default for RangePartitioner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -443,8 +551,7 @@ impl ResultMerger {
         let mut iterators: Vec<std::vec::IntoIter<T>> =
             results.into_iter().map(|v| v.into_iter()).collect();
 
-        let mut heap: BinaryHeap<MergeItem<T>> =
-            BinaryHeap::with_capacity(iterators.len());
+        let mut heap: BinaryHeap<MergeItem<T>> = BinaryHeap::with_capacity(iterators.len());
 
         // Seed the heap with the first element from each non-empty shard.
         for (shard_idx, iter) in iterators.iter_mut().enumerate() {
@@ -497,8 +604,7 @@ impl ResultMerger {
         let mut iterators: Vec<std::vec::IntoIter<T>> =
             results.into_iter().map(|v| v.into_iter()).collect();
 
-        let mut heap: BinaryHeap<MergeItemByKey<T, K>> =
-            BinaryHeap::with_capacity(iterators.len());
+        let mut heap: BinaryHeap<MergeItemByKey<T, K>> = BinaryHeap::with_capacity(iterators.len());
 
         for (shard_idx, iter) in iterators.iter_mut().enumerate() {
             if let Some(value) = iter.next() {
@@ -564,8 +670,7 @@ impl ResultMerger {
         let mut iterators: Vec<std::vec::IntoIter<T>> =
             results.into_iter().map(|v| v.into_iter()).collect();
 
-        let mut heap: BinaryHeap<MergeItem<T>> =
-            BinaryHeap::with_capacity(iterators.len());
+        let mut heap: BinaryHeap<MergeItem<T>> = BinaryHeap::with_capacity(iterators.len());
 
         for (shard_idx, iter) in iterators.iter_mut().enumerate() {
             if let Some(value) = iter.next() {
@@ -584,7 +689,7 @@ impl ResultMerger {
             let shard_idx = item.shard_idx;
 
             // Skip duplicate if the last pushed element is equal.
-            let is_dup = merged.last().map_or(false, |last: &T| last == &item.value);
+            let is_dup = merged.last().is_some_and(|last: &T| last == &item.value);
             if !is_dup {
                 merged.push(item.value);
             }
@@ -611,18 +716,15 @@ mod tests {
         let registry = Arc::new(ShardRegistry::new());
 
         // Create 3 shards with non-overlapping ranges
-        let range1 = KeyRange::new(Key::from_str("a"), Key::from_str("h"))
-            .expect("valid range");
+        let range1 = KeyRange::new(Key::from_str("a"), Key::from_str("h")).expect("valid range");
         let shard1 = ShardMetadata::new(1, range1, 100);
         registry.register(shard1).expect("register shard 1");
 
-        let range2 = KeyRange::new(Key::from_str("h"), Key::from_str("p"))
-            .expect("valid range");
+        let range2 = KeyRange::new(Key::from_str("h"), Key::from_str("p")).expect("valid range");
         let shard2 = ShardMetadata::new(2, range2, 101);
         registry.register(shard2).expect("register shard 2");
 
-        let range3 = KeyRange::new(Key::from_str("p"), Key::from_str("z"))
-            .expect("valid range");
+        let range3 = KeyRange::new(Key::from_str("p"), Key::from_str("z")).expect("valid range");
         let shard3 = ShardMetadata::new(3, range3, 102);
         registry.register(shard3).expect("register shard 3");
 
@@ -662,8 +764,8 @@ mod tests {
     #[test]
     fn test_partitioner_consistent_hash_routing() -> RaftResult<()> {
         let registry = create_test_registry();
-        let partitioner = Partitioner::new(registry, PartitionStrategy::ConsistentHash)
-            .with_virtual_nodes(50);
+        let partitioner =
+            Partitioner::new(registry, PartitionStrategy::ConsistentHash).with_virtual_nodes(50);
 
         // Consistent hashing should be deterministic
         let shard1 = partitioner.route_key(&Key::from_str("test_key"))?;
@@ -715,7 +817,10 @@ mod tests {
 
         let plan = router.route_range_query(&Key::from_str("d"), &Key::from_str("m"))?;
         match plan {
-            QueryPlan::Scatter { targets, merge_required } => {
+            QueryPlan::Scatter {
+                targets,
+                merge_required,
+            } => {
                 assert!(merge_required);
                 assert_eq!(targets.len(), 2); // Two nodes involved
             }
@@ -1061,5 +1166,72 @@ mod tests {
                 window[1]
             );
         }
+    }
+
+    #[test]
+    fn test_hash_ring_maintained() {
+        let mut ring = HashRing::new(10);
+
+        // Add two shards and verify keys route to one of them.
+        ring.add_shard(1u64);
+        ring.add_shard(2u64);
+
+        let key = Key::from_str("hello");
+        let shard = ring.get_shard_for_key(&key);
+        assert!(shard.is_some(), "key must route to some shard");
+        let shard_id = shard.expect("key must route to some shard");
+        assert!(shard_id == 1 || shard_id == 2);
+
+        // Remove shard 1 — all keys must now route to shard 2.
+        ring.remove_shard(1u64);
+        let shard_after = ring.get_shard_for_key(&key);
+        assert_eq!(shard_after, Some(2u64));
+    }
+
+    #[test]
+    fn test_range_partitioner_routing() {
+        let mut rp = RangePartitioner::new();
+        rp.add_range(b"a".to_vec(), 1u64);
+        rp.add_range(b"m".to_vec(), 2u64);
+        rp.add_range(b"z".to_vec(), 3u64);
+
+        // "apple" >= "a" and < "m" → shard 1
+        let k_apple = Key::from_str("apple");
+        assert_eq!(rp.get_shard_for_key(&k_apple), Some(1u64));
+
+        // "moon" >= "m" and < "z" → shard 2
+        let k_moon = Key::from_str("moon");
+        assert_eq!(rp.get_shard_for_key(&k_moon), Some(2u64));
+
+        // "zebra" >= "z" → shard 3
+        let k_zebra = Key::from_str("zebra");
+        assert_eq!(rp.get_shard_for_key(&k_zebra), Some(3u64));
+
+        // Key before any range → None
+        let k_zero = Key::from_slice(&[0u8]);
+        assert_eq!(rp.get_shard_for_key(&k_zero), None);
+    }
+
+    #[test]
+    fn test_partitioner_consistent_hash_uses_ring() {
+        // Build a registry with two shards.
+        let registry = Arc::new(ShardRegistry::new());
+        let range1 = KeyRange::new(Key::from_str("a"), Key::from_str("m")).expect("valid range");
+        let range2 = KeyRange::new(Key::from_str("m"), Key::from_str("z")).expect("valid range");
+        let shard1 = ShardMetadata::new(1, range1, 100);
+        let shard2 = ShardMetadata::new(2, range2, 101);
+        registry.register(shard1).expect("register shard 1");
+        registry.register(shard2).expect("register shard 2");
+
+        let partitioner = Partitioner::new(registry, PartitionStrategy::ConsistentHash);
+
+        // Routing must succeed for a key in the hash space.
+        let key = Key::from_str("hello");
+        let result = partitioner.route_key(&key);
+        assert!(
+            result.is_ok(),
+            "consistent hash routing must succeed: {:?}",
+            result
+        );
     }
 }

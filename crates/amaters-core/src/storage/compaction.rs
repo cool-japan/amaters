@@ -539,6 +539,10 @@ impl CompactionExecutor {
             .files_merged
             .fetch_add(files_merged, Ordering::Relaxed);
 
+        let _span =
+            tracing::debug_span!("amaters.storage.compaction", files_merged = files_merged,)
+                .entered();
+
         // Collect all entries from source and target SSTables
         let mut all_entries: BTreeMap<Key, Option<CipherBlob>> = BTreeMap::new();
 

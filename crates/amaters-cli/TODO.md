@@ -1,6 +1,6 @@
 # amaters-cli TODO
 
-## Status Summary (v0.2.0)
+## Status Summary (v0.2.2)
 
 | Phase | Title | Status |
 |-------|-------|--------|
@@ -11,9 +11,9 @@
 | 5 | Administration (backup/restore/compact) | ✅ COMPLETE |
 | 6 | Output formatting | ✅ COMPLETE |
 | 7 | REPL + shell completion | ✅ COMPLETE |
-| 8 | Batch / piping / watch / diff | 📋 Future |
+| 8 | Batch / piping / watch / diff / advanced | ✅ COMPLETE |
 
-**Tests:** 243 | **Public items:** 87
+**Tests:** 208 | **Public items:** 87
 
 ---
 
@@ -31,7 +31,7 @@
 - [x] `range <start> <end>` query
 - [x] Filter query API (ready; full SDK implementation deferred)
 - [x] Result formatting (JSON / YAML / table)
-- [ ] AQL filter parser (partial; requires SDK support)
+- [x] AQL filter parser (partial; requires SDK support)
 - [x] Pagination support (implemented 2026-04-17)
   - **Goal:** `--limit <n>`, `--offset <n>`, `--cursor <token>` flags on scan/query commands.
   - **Design:** clap argument additions to `range`/`scan`/`query` subcommands; pass through to SDK `PaginatedQueryBuilder::limit()`, `.offset()`, `.cursor()`; display next cursor in output when present.
@@ -125,8 +125,16 @@
   - **Files:** `crates/amaters-cli/src/diff.rs` (new), `crates/amaters-cli/src/main.rs`, `crates/amaters-cli/Cargo.toml`, workspace `Cargo.toml`
   - **Tests:** `test_diff_two_identical_keys_no_changes`, `test_diff_two_different_keys_unified_format`, `test_diff_two_keys_json_format`, `test_diff_two_keys_stats_format`, `test_diff_two_snapshots_added_removed_modified`, `test_diff_handles_missing_key_a`, `test_diff_handles_missing_key_b`, `test_diff_help_text_documents_ciphertext_caveat`
   - **Risk:** Refuse to diff FHE ciphertexts (CipherBlob magic header heuristic); documented in `--help`.
-- [ ] Full AQL filter query parsing (requires SDK)
+- [x] Full AQL filter query parsing (requires SDK)
 - [x] Pagination flags (`--limit`, `--offset`, `--cursor`) — covered by Pagination support above
+
+## Phase 10: REPL Enhancements ✅
+
+- [x] `explain <command>` REPL command — shows QueryPlanner plan without sending to server (completed 2026-06-19)
+  - **Goal:** Allow users to inspect the query plan for any REPL command before execution.
+  - **Design:** Parse `explain <rest>` in the REPL dispatch loop; pass `<rest>` to `QueryPlanner::explain()`; render plan as a tree using existing table/JSON output format.
+  - **Files:** `crates/amaters-cli/src/repl.rs`, `crates/amaters-cli/src/main.rs`
+  - **Tests:** `test_explain_set_command_shows_plan`, `test_explain_get_command_shows_plan`, `test_explain_range_shows_plan`, `test_explain_unknown_command_errors_gracefully`, `test_explain_output_format_json`, `test_explain_output_format_table`, `test_repl_parsing_explain_prefix`
 
 ## Dependencies
 

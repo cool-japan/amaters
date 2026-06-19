@@ -2,7 +2,7 @@
 
 AmateRS Database Server
 
-**Status:** Alpha | **Version:** 0.2.0 | **License:** Apache-2.0 | **Tests:** 402 passing, 23 skipped (performance benchmarks) | **Public items:** 311
+**Status:** Alpha | **Version:** 0.2.2 | **License:** Apache-2.0 | **Tests:** 470 passing, 23 skipped (performance benchmarks) | **Public items:** ~400
 
 ## Overview
 
@@ -21,6 +21,8 @@ AmateRS Database Server
 - **Log rotation**: Time-based (hourly/daily) and size-based (`Rotation::Size(u64)`) via custom `SizeRotatingWriter`; automatic rollover and old-file cleanup
 - **Graceful shutdown hooks**: WAL writer flush, memtable flush, connection drain
 - **Server configuration**: TOML-based with environment variable and CLI overrides
+- **Migration registry**: `MigrationRegistry` for versioned document migrations — register, look up, and apply named migration functions by version key
+- **Constant-time API key comparison**: security fix — API key verification uses `subtle::ConstantTimeEq` to prevent timing-based key enumeration
 
 ## Installation
 
@@ -118,7 +120,8 @@ amaters-server
 ├── Authentication (src/auth.rs)
 │   ├── JWT validator (HS/RS/ES/EdDSA)
 │   ├── API key verifier
-│   └── mTLS certificate validator
+│   ├── mTLS certificate validator
+│   └── Constant-time API key comparison (subtle::ConstantTimeEq)
 ├── Authorization (src/authz.rs)
 │   ├── RBAC engine
 │   ├── Built-in roles (admin / user / reader)
@@ -127,6 +130,9 @@ amaters-server
 ├── Query Engine
 │   ├── GET / SET / DELETE / RANGE handlers
 │   └── Result Cache (LRU + blake3 + write-through)
+├── Migration Registry (src/migration_registry.rs)
+│   ├── Versioned document migrations
+│   └── Named migration functions by version key
 ├── Storage
 │   ├── Memory backend
 │   └── LSM-Tree (WAL + memtable)

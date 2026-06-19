@@ -4,9 +4,9 @@ TypeScript/WASM SDK for [AmateRS](https://github.com/cool-japan/amaters) — a d
 
 > **Status**: Alpha — API is stabilising. Not yet recommended for production use.
 
-- 84 tests
+- 91 tests
 - 189 public API items
-- Version: 0.2.0
+- Version: 0.2.2
 - License: Apache-2.0
 
 ## Features

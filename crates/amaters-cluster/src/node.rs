@@ -2,15 +2,15 @@
 
 use crate::config::DynamicConfig;
 use crate::error::{RaftError, RaftResult};
-use crate::failover::{FailoverConfig, FailoverCoordinator};
-use crate::log::{Command, LogEntry, RaftLog};
+use crate::failover::{AlertEvent, AlertManager, FailoverConfig, FailoverCoordinator};
+use crate::log::{Command, LogEntry, RaftLog, StateMachine};
 use crate::persistence::{FilePersistence, RaftPersistence};
 use crate::rpc::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
 use crate::snapshot::{
     InstallSnapshotRequest, InstallSnapshotResponse, Snapshot, SnapshotConfig, SnapshotManager,
-    SnapshotPolicy, SnapshotReceiver,
+    SnapshotPolicy, SnapshotReceiver, SnapshotStreamReceiver,
 };
 use crate::state::FencingTokenState;
 use crate::state::{CandidateState, LeaderState, PersistentState, VolatileState};
@@ -56,6 +56,19 @@ pub struct RaftNode {
     fencing_token_state: Arc<FencingTokenState>,
     /// True while WAL replay is in progress; RPCs are rejected during this window
     is_recovering: Arc<AtomicBool>,
+    /// Active snapshot streamers for outbound chunked snapshot transfers.
+    ///
+    /// Keyed by target peer `NodeId`. Entries are created the first time a
+    /// large snapshot transfer is initiated for a peer and removed when the
+    /// final chunk is delivered or when this node steps down.
+    snapshot_streamers:
+        Arc<RwLock<std::collections::HashMap<NodeId, crate::snapshot::SnapshotStreamer>>>,
+    /// Per-sender streaming snapshot receivers for inbound chunked snapshot transfers.
+    ///
+    /// Keyed by sender `NodeId`. Entries are created on the first chunk from a sender
+    /// and removed on completion or error. Cleared when node steps down.
+    snapshot_stream_receivers:
+        Arc<RwLock<std::collections::HashMap<NodeId, SnapshotStreamReceiver>>>,
     /// Hot-reloadable configuration subset.
     ///
     /// The Raft event loop reads `heartbeat_interval_ms` and
@@ -72,6 +85,22 @@ pub struct RaftNode {
     /// heartbeat timeout.  The coordinator is seeded with the cluster peers
     /// at construction time.
     pub failover_coordinator: Arc<RwLock<FailoverCoordinator>>,
+    /// Optional placement scheduler handle.
+    ///
+    /// Populated via [`attach_placement_scheduler`][Self::attach_placement_scheduler].
+    /// Cleared (and the scheduler stopped) whenever the node steps down.
+    placement_scheduler_handle:
+        Arc<RwLock<Option<crate::placement_scheduler::PlacementSchedulerHandle>>>,
+    /// Optional state machine driven by committed log entries.
+    ///
+    /// Set via [`set_state_machine`][Self::set_state_machine].  Entries are
+    /// applied automatically after the commit index advances.
+    state_machine: Arc<parking_lot::Mutex<Option<Box<dyn StateMachine>>>>,
+    /// Optional alerting manager for cluster events (leader change, quorum
+    /// loss, slow replication, …).
+    ///
+    /// Set via [`set_alert_manager`][Self::set_alert_manager].
+    alert_manager: Option<Arc<AlertManager>>,
 }
 
 impl RaftNode {
@@ -175,6 +204,8 @@ impl RaftNode {
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
             snapshot_manager: Arc::new(RwLock::new(snapshot_manager)),
             snapshot_receiver: Arc::new(RwLock::new(None)),
+            snapshot_streamers: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            snapshot_stream_receivers: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence,
             config_state: Arc::new(RwLock::new(config_state)),
             stepping_down: Arc::new(RwLock::new(false)),
@@ -185,6 +216,9 @@ impl RaftNode {
                 compaction_threshold: 10_000,
             })),
             failover_coordinator,
+            placement_scheduler_handle: Arc::new(RwLock::new(None)),
+            state_machine: Arc::new(parking_lot::Mutex::new(None)),
+            alert_manager: None,
         })
     }
 
@@ -272,6 +306,8 @@ impl RaftNode {
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
             snapshot_manager: Arc::new(RwLock::new(snapshot_manager)),
             snapshot_receiver: Arc::new(RwLock::new(None)),
+            snapshot_streamers: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            snapshot_stream_receivers: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: Some(persistence),
             config_state: Arc::new(RwLock::new(config_state)),
             stepping_down: Arc::new(RwLock::new(false)),
@@ -282,6 +318,9 @@ impl RaftNode {
                 compaction_threshold: 10_000,
             })),
             failover_coordinator: failover_coordinator_wp,
+            placement_scheduler_handle: Arc::new(RwLock::new(None)),
+            state_machine: Arc::new(parking_lot::Mutex::new(None)),
+            alert_manager: None,
         })
     }
 
@@ -624,6 +663,13 @@ impl RaftNode {
                     new_commit_index = new_commit,
                     "Updated commit index"
                 );
+                // Release the log write-lock before applying entries so that
+                // the state machine can call back into the node without deadlock.
+                drop(log);
+                if let Err(e) = self.apply_committed_entries() {
+                    warn!(node_id = self.node_id(), error = ?e, "Failed to apply committed entries");
+                }
+                return AppendEntriesResponse::success(self.current_term(), self.last_log_index());
             }
         }
 
@@ -776,12 +822,25 @@ impl RaftNode {
         self.fencing_token_state.bump_term_token(term as u32);
 
         // Tell the failover coordinator we are now the leader.
-        self.failover_coordinator.write().set_leader(self.node_id());
+        let prev_leader = {
+            let mut fo = self.failover_coordinator.write();
+            let old = fo.leader_hint();
+            fo.set_leader(self.node_id());
+            old
+        };
 
         // Update metrics: term and leader change counter.
         let metrics = crate::metrics::global();
         metrics.set_current_term(term);
         metrics.inc_leader_changes();
+
+        // Emit an alerting event for the leader change.
+        if let Some(am) = &self.alert_manager {
+            am.emit(AlertEvent::LeaderChanged {
+                old_leader: prev_leader,
+                new_leader: self.node_id(),
+            });
+        }
 
         info!(
             node_id = self.node_id(),
@@ -988,6 +1047,7 @@ impl RaftNode {
             self.persist_state(persistent.current_term, persistent.voted_for);
             volatile.become_follower(None);
             *self.leader_state.write() = None;
+            self.snapshot_streamers.write().clear();
             crate::metrics::global().set_current_term(persistent.current_term);
             info!(
                 node_id = self.node_id(),
@@ -1018,6 +1078,24 @@ impl RaftNode {
                 "Replication successful"
             );
 
+            // Emit SlowReplication alert if this follower is lagging.
+            {
+                const SLOW_REPLICATION_THRESHOLD: u64 = 100;
+                let committed = self.log.read().commit_index();
+                let follower_match = resp.last_log_index;
+                if committed > follower_match {
+                    let lag = committed - follower_match;
+                    if lag > SLOW_REPLICATION_THRESHOLD {
+                        if let Some(am) = &self.alert_manager {
+                            am.emit(AlertEvent::SlowReplication {
+                                follower: from,
+                                lag_entries: lag,
+                            });
+                        }
+                    }
+                }
+            }
+
             // Try to advance commit index, using joint-consensus-aware
             // calculation when a membership change is in progress.
             let config_state = self.config_state.read().clone();
@@ -1027,22 +1105,36 @@ impl RaftNode {
                 &config_state,
             );
 
-            let mut log = self.log.write();
-            if new_commit > log.commit_index() {
-                // Only commit entries from the current term (Raft safety)
-                if let Some(term) = log.get_term(new_commit) {
-                    if term == self.current_term() {
-                        let old_commit = log.commit_index();
-                        log.set_commit_index(new_commit)?;
-                        crate::metrics::global().set_commit_index(new_commit);
-                        crate::metrics::global().set_log_entry_count(log.last_index());
-                        info!(
-                            node_id = self.node_id(),
-                            old_commit_index = old_commit,
-                            new_commit_index = new_commit,
-                            "Advanced commit index"
-                        );
+            let committed_advanced = {
+                let mut log = self.log.write();
+                if new_commit > log.commit_index() {
+                    // Only commit entries from the current term (Raft safety)
+                    if let Some(term) = log.get_term(new_commit) {
+                        if term == self.current_term() {
+                            let old_commit = log.commit_index();
+                            log.set_commit_index(new_commit)?;
+                            crate::metrics::global().set_commit_index(new_commit);
+                            crate::metrics::global().set_log_entry_count(log.last_index());
+                            info!(
+                                node_id = self.node_id(),
+                                old_commit_index = old_commit,
+                                new_commit_index = new_commit,
+                                "Advanced commit index"
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
                     }
+                } else {
+                    false
+                }
+            };
+            if committed_advanced {
+                if let Err(e) = self.apply_committed_entries() {
+                    warn!(node_id = self.node_id(), error = ?e, "Failed to apply committed entries");
                 }
             }
         } else {
@@ -1235,6 +1327,8 @@ impl RaftNode {
             volatile.become_follower(Some(req.leader_id));
             *self.leader_state.write() = None;
             *self.candidate_state.write() = None;
+            self.snapshot_streamers.write().clear();
+            self.snapshot_stream_receivers.write().clear();
             debug!(
                 node_id = self.node_id(),
                 from_term = from_term,
@@ -1265,107 +1359,231 @@ impl RaftNode {
         drop(persistent);
         drop(volatile);
 
-        // Handle chunked snapshot transfer
-        let mut receiver_guard = self.snapshot_receiver.write();
+        // Handle chunked snapshot transfer using disk-streaming receiver to avoid RAM buffering.
+        //
+        // We use snapshot_dir for temp files; if unavailable, fall back to the in-memory receiver.
+        let snapshot_dir = self.config.snapshot_dir.clone();
 
-        // If this is a new snapshot transfer (offset 0), create a new receiver
-        if req.offset == 0 {
-            *receiver_guard = Some(SnapshotReceiver::new(
-                req.last_included_index,
-                req.last_included_term,
-            ));
-        }
+        if let Some(ref dir) = snapshot_dir {
+            // Disk-streaming path: chunks go directly to a temp file.
+            let mut receivers = self.snapshot_stream_receivers.write();
 
-        let receiver = match receiver_guard.as_mut() {
-            Some(r) => r,
-            None => {
-                // No active receiver and offset != 0 - this is unexpected
-                warn!(
-                    node_id = self.node_id(),
-                    offset = req.offset,
-                    "Received non-initial snapshot chunk without active receiver"
+            // Create or retrieve the receiver for this sender.
+            let receiver = match receivers.entry(req.leader_id) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    let r = SnapshotStreamReceiver::new(
+                        dir,
+                        req.last_included_index,
+                        req.last_included_term,
+                    )?;
+                    v.insert(r)
+                }
+            };
+
+            let result = receiver.receive_chunk(&req)?;
+
+            if let Some(final_path) = result {
+                // Remove the completed receiver before acquiring other locks.
+                receivers.remove(&req.leader_id);
+                drop(receivers);
+
+                // Load the snapshot from the written file and install it.
+                let snapshot_data = std::fs::read(&final_path).map_err(|e| {
+                    crate::error::RaftError::StorageError {
+                        message: format!(
+                            "Failed to read received snapshot file '{}': {}",
+                            final_path.display(),
+                            e
+                        ),
+                    }
+                })?;
+
+                let snapshot = Snapshot::new(
+                    req.last_included_index,
+                    req.last_included_term,
+                    snapshot_data,
                 );
-                return Ok(InstallSnapshotResponse::new(current_term));
+
+                let mut snap_guard = self.snapshot_manager.write();
+                if let Some(manager) = snap_guard.as_mut() {
+                    manager.install_snapshot(snapshot)?;
+                }
+                drop(snap_guard);
+
+                // Reset the log to match the snapshot
+                let mut log = self.log.write();
+                log.install_snapshot(req.last_included_index, req.last_included_term);
+
+                info!(
+                    node_id = self.node_id(),
+                    last_included_index = req.last_included_index,
+                    last_included_term = req.last_included_term,
+                    "Installed snapshot from leader (streaming path)"
+                );
             }
-        };
+        } else {
+            // In-memory fallback: use the existing SnapshotReceiver.
+            let mut receiver_guard = self.snapshot_receiver.write();
 
-        // Feed the chunk to the receiver
-        let completed = receiver.receive_chunk(&req)?;
-
-        if let Some(snapshot) = completed {
-            // Clear receiver
-            *receiver_guard = None;
-            drop(receiver_guard);
-
-            // Install the snapshot
-            let mut snap_guard = self.snapshot_manager.write();
-            if let Some(manager) = snap_guard.as_mut() {
-                manager.install_snapshot(snapshot)?;
+            if req.offset == 0 {
+                *receiver_guard = Some(SnapshotReceiver::new(
+                    req.last_included_index,
+                    req.last_included_term,
+                ));
             }
 
-            // Reset the log to match the snapshot
-            let mut log = self.log.write();
-            log.install_snapshot(req.last_included_index, req.last_included_term);
+            let receiver = match receiver_guard.as_mut() {
+                Some(r) => r,
+                None => {
+                    warn!(
+                        node_id = self.node_id(),
+                        offset = req.offset,
+                        "Received non-initial snapshot chunk without active receiver"
+                    );
+                    return Ok(InstallSnapshotResponse::new(current_term));
+                }
+            };
 
-            info!(
-                node_id = self.node_id(),
-                last_included_index = req.last_included_index,
-                last_included_term = req.last_included_term,
-                "Installed snapshot from leader"
-            );
+            let completed = receiver.receive_chunk(&req)?;
+
+            if let Some(snapshot) = completed {
+                *receiver_guard = None;
+                drop(receiver_guard);
+
+                let mut snap_guard = self.snapshot_manager.write();
+                if let Some(manager) = snap_guard.as_mut() {
+                    manager.install_snapshot(snapshot)?;
+                }
+
+                let mut log = self.log.write();
+                log.install_snapshot(req.last_included_index, req.last_included_term);
+
+                info!(
+                    node_id = self.node_id(),
+                    last_included_index = req.last_included_index,
+                    last_included_term = req.last_included_term,
+                    "Installed snapshot from leader (in-memory path)"
+                );
+            }
         }
 
         Ok(InstallSnapshotResponse::new(current_term))
     }
 
-    /// Prepare an InstallSnapshot request for a follower that is too far behind
+    /// Prepare an InstallSnapshot request for a follower that is too far behind.
     ///
-    /// This is called by the leader when a follower's next_index falls behind
-    /// the snapshot point and log entries are no longer available.
+    /// For snapshots at or below `snapshot_chunk_threshold_bytes` the full data
+    /// is loaded into memory and sent as a single `done=true` request.  For
+    /// larger snapshots a [`crate::snapshot::SnapshotStreamer`] is created (or
+    /// resumed) and one chunk is emitted per call; the streamer is automatically
+    /// cleaned up once the final chunk is delivered.
+    ///
+    /// Returns `Ok(None)` when this node is not the leader, when no snapshot
+    /// exists, or when the target peer has already caught up past the snapshot
+    /// point via normal log replication.
     pub fn prepare_install_snapshot(
         &self,
         target_peer: NodeId,
     ) -> RaftResult<Option<InstallSnapshotRequest>> {
-        let volatile = self.volatile.read();
-        if !volatile.is_leader() {
+        // Must be leader to send snapshots.
+        if !self.volatile.read().is_leader() {
             return Ok(None);
         }
-        drop(volatile);
 
-        let snap_guard = self.snapshot_manager.read();
-        let manager = match snap_guard.as_ref() {
-            Some(m) => m,
-            None => return Ok(None),
-        };
-
-        let snapshot = match manager.load_latest()? {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        // Check if the peer actually needs a snapshot
-        let leader_state_guard = self.leader_state.read();
-        if let Some(leader_state) = leader_state_guard.as_ref() {
-            let next_index = leader_state.get_next_index(target_peer);
-            let log = self.log.read();
-            let (snap_idx, _) = log.get_snapshot_point();
-
-            if next_index > snap_idx {
-                // Peer doesn't need a snapshot, normal replication will work
-                return Ok(None);
+        // Determine whether the peer still needs a snapshot and which snapshot to use.
+        // We extract all needed values while holding the read locks, then drop them
+        // before acquiring any write locks (no lock inversion).
+        let snap_meta = {
+            let snap_guard = self.snapshot_manager.read();
+            match snap_guard.as_ref() {
+                Some(m) => match m.get_latest_metadata() {
+                    Some(meta) => meta.clone(),
+                    None => return Ok(None),
+                },
+                None => return Ok(None),
             }
+        };
+
+        // Check if the peer actually needs a snapshot.
+        let next_index = {
+            let leader_guard = self.leader_state.read();
+            match leader_guard.as_ref() {
+                Some(ls) => ls.get_next_index(target_peer),
+                // Not leader anymore — bail out.
+                None => return Ok(None),
+            }
+        };
+
+        if next_index > snap_meta.last_included_index {
+            // Peer has caught up — clean up any in-progress streamer and return.
+            self.snapshot_streamers.write().remove(&target_peer);
+            return Ok(None);
         }
 
         let term = self.current_term();
-        let req = InstallSnapshotRequest::new_complete(
-            term,
-            self.node_id(),
-            snapshot.metadata.last_included_index,
-            snapshot.metadata.last_included_term,
-            snapshot.data,
-        );
+        let threshold = self.config.snapshot_chunk_threshold_bytes;
 
-        Ok(Some(req))
+        if snap_meta.size_bytes <= threshold {
+            // Small snapshot: single-shot (original behaviour, no streamer required).
+            let snapshot = {
+                let snap_guard = self.snapshot_manager.read();
+                match snap_guard.as_ref() {
+                    Some(m) => m.load_latest()?.ok_or_else(|| RaftError::StorageError {
+                        message: "snapshot disappeared between metadata fetch and load".into(),
+                    })?,
+                    None => return Ok(None),
+                }
+            };
+            return Ok(Some(InstallSnapshotRequest::new_complete(
+                term,
+                self.node_id(),
+                snap_meta.last_included_index,
+                snap_meta.last_included_term,
+                snapshot.data,
+            )));
+        }
+
+        // Large snapshot: chunked streaming.
+        let chunk_size = self.config.snapshot_chunk_size_bytes;
+
+        // Obtain the on-disk path before acquiring the streamer write-lock so
+        // we never hold both the snapshot_manager lock and the streamer lock
+        // at the same time.
+        let data_path_for_new = {
+            let snap_guard = self.snapshot_manager.read();
+            match snap_guard.as_ref() {
+                Some(m) => m
+                    .latest_data_path()
+                    .ok_or_else(|| RaftError::StorageError {
+                        message: "snapshot data path not found for chunked transfer".into(),
+                    })?,
+                None => return Ok(None),
+            }
+        };
+
+        let mut streamers = self.snapshot_streamers.write();
+        let streamer = match streamers.entry(target_peer) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(crate::snapshot::SnapshotStreamer::new(
+                    data_path_for_new,
+                    snap_meta.clone(),
+                    chunk_size,
+                )?)
+            }
+        };
+
+        let req = streamer.next_chunk_for_rpc(term, self.node_id())?;
+
+        // If the final chunk was just emitted, remove the streamer.
+        let is_done = req.as_ref().is_some_and(|r| r.done);
+        drop(streamers);
+        if is_done {
+            self.snapshot_streamers.write().remove(&target_peer);
+        }
+
+        Ok(req)
     }
 
     /// Check if a follower needs a snapshot instead of normal log replication
@@ -1542,6 +1760,25 @@ impl RaftNode {
         *self.stepping_down.read()
     }
 
+    /// Attach an optional shard placement scheduler.
+    ///
+    /// The scheduler is started in the background via `tokio::spawn` and its
+    /// handle is stored so that `step_down` can stop it
+    /// automatically when this node loses leadership.  Subsequent calls replace
+    /// the previous handle, stopping the old scheduler first.
+    pub fn attach_placement_scheduler(
+        self: &Arc<Self>,
+        scheduler: crate::placement_scheduler::PlacementScheduler,
+    ) {
+        let handle = scheduler.handle();
+        tokio::spawn(scheduler.run());
+        let mut guard = self.placement_scheduler_handle.write();
+        if let Some(old) = guard.take() {
+            old.stop();
+        }
+        *guard = Some(handle);
+    }
+
     /// Gracefully step down: revert to follower and mark as stepping down.
     fn step_down(&self) {
         let mut volatile = self.volatile.write();
@@ -1549,6 +1786,11 @@ impl RaftNode {
         *self.leader_state.write() = None;
         *self.candidate_state.write() = None;
         *self.stepping_down.write() = true;
+        self.snapshot_streamers.write().clear();
+        self.snapshot_stream_receivers.write().clear();
+        if let Some(handle) = self.placement_scheduler_handle.write().take() {
+            handle.stop();
+        }
 
         info!(
             node_id = self.node_id(),
@@ -1645,6 +1887,83 @@ impl RaftNode {
         );
     }
 
+    // ── State machine application ──────────────────────────────────
+
+    /// Register a [`StateMachine`] to receive committed log entries.
+    ///
+    /// After this call every committed entry that has not yet been applied will
+    /// be fed to the state machine the next time the commit index advances.
+    /// Only one state machine can be active at a time; calling this method
+    /// again replaces the previous one.
+    pub fn set_state_machine(&self, sm: impl StateMachine + 'static) -> RaftResult<()> {
+        let mut guard = self.state_machine.lock();
+        *guard = Some(Box::new(sm));
+        Ok(())
+    }
+
+    /// Apply all committed-but-not-yet-applied log entries to the registered
+    /// state machine (if any).
+    ///
+    /// The method acquires the log write-lock briefly for each batch and updates
+    /// `applied_index` on success.  Errors from the state machine are propagated
+    /// to the caller; the `applied_index` advances only for successfully applied
+    /// entries.
+    fn apply_committed_entries(&self) -> RaftResult<()> {
+        // Collect entries to apply while holding the log read-lock, then
+        // release it before calling the (potentially slow) state machine.
+        let entries_to_apply = {
+            let log = self.log.read();
+            if log.applied_index() >= log.commit_index() {
+                return Ok(());
+            }
+            log.get_uncommitted_entries()
+        };
+
+        if entries_to_apply.is_empty() {
+            return Ok(());
+        }
+
+        let mut sm_guard = self.state_machine.lock();
+        let sm = match sm_guard.as_mut() {
+            Some(s) => s,
+            None => {
+                // No state machine registered — just advance applied_index.
+                let mut log = self.log.write();
+                if let Some(last) = entries_to_apply.last() {
+                    log.set_applied_index(last.index)?;
+                }
+                return Ok(());
+            }
+        };
+
+        for entry in &entries_to_apply {
+            sm.apply(entry).map_err(|e| {
+                warn!(
+                    node_id = self.node_id(),
+                    index = entry.index,
+                    error = ?e,
+                    "State machine failed to apply entry"
+                );
+                e
+            })?;
+            // Advance applied_index one step at a time so that on error the
+            // log reflects the last successfully applied entry.
+            self.log.write().set_applied_index(entry.index)?;
+        }
+
+        Ok(())
+    }
+
+    /// Attach an [`AlertManager`] to this node.
+    ///
+    /// After this call the node will emit [`AlertEvent`]s to the manager on
+    /// significant state changes (leader election, slow replication, etc.).
+    /// Only one manager can be active at a time; calling this again replaces
+    /// the previous one.
+    pub fn set_alert_manager(&mut self, am: Arc<AlertManager>) {
+        self.alert_manager = Some(am);
+    }
+
     /// Trigger a failover election if this node is a follower.
     /// Returns the vote requests to send to peers, or an empty vec
     /// if the node is not in follower state.
@@ -1658,71 +1977,24 @@ impl RaftNode {
 }
 
 // ---------------------------------------------------------------------------
-// WAL replay helper
+// WAL replay helper (extracted to node_wal_replay.rs to keep this file ≤ 2 000 lines)
 // ---------------------------------------------------------------------------
 
-/// Replay WAL entries from `wal_dir` into `log`, merging with any entries
-/// already present.
-///
-/// Strategy: WAL entries with indices greater than the current `log.last_index()`
-/// are appended verbatim.  Entries at or below the current last index are
-/// skipped (persistence already covers them, and WAL is treated as a
-/// superset or equal set).  If the WAL has a higher-index entry that
-/// conflicts in term, the WAL version wins (WAL is more recent).
-///
-/// Uses [`CorruptionPolicy::TruncateToLastGood`] for crash safety (partial
-/// final entries are silently discarded).
-fn replay_wal_into_log(wal_dir: &std::path::Path, log: &mut RaftLog) -> RaftResult<()> {
-    let reader = WalReader::new(wal_dir);
-    let (wal_entries, diag) = reader.recover_with_policy(CorruptionPolicy::TruncateToLastGood)?;
-
-    if diag.corrupt_entries > 0 || diag.truncated_segments > 0 {
-        warn!(
-            corrupt_entries = diag.corrupt_entries,
-            truncated_segments = diag.truncated_segments,
-            valid_entries = diag.valid_entries,
-            "WAL replay: corruption/truncation detected"
-        );
-    }
-
-    if wal_entries.is_empty() {
-        info!(wal_dir = %wal_dir.display(), "WAL replay: no entries to recover");
-        return Ok(());
-    }
-
-    let current_last = log.last_index();
-    let new_entries: Vec<LogEntry> = wal_entries
-        .into_iter()
-        .filter(|e| e.index > current_last)
-        .collect();
-
-    if new_entries.is_empty() {
-        info!(
-            wal_dir = %wal_dir.display(),
-            current_last,
-            "WAL replay: all WAL entries already present in log"
-        );
-        return Ok(());
-    }
-
-    let replayed_count = new_entries.len();
-    let first_new = new_entries[0].index;
-    let last_new = new_entries[new_entries.len() - 1].index;
-
-    log.append_entries(new_entries)?;
-
-    info!(
-        wal_dir = %wal_dir.display(),
-        replayed_count,
-        first_new,
-        last_new,
-        new_last_index = log.last_index(),
-        "WAL replay complete"
-    );
-
-    Ok(())
-}
+#[path = "node_wal_replay.rs"]
+mod wal_replay;
+use wal_replay::replay_wal_into_log;
 
 #[cfg(test)]
 #[path = "node_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "node_tests_advanced.rs"]
+mod tests_advanced;
+
+#[cfg(test)]
+#[path = "integration_tests.rs"]
+mod integration_tests;
+#[cfg(test)]
+#[path = "node_snapshot_tests.rs"]
+mod snapshot_tests;

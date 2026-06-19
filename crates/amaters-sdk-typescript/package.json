@@ -1,6 +1,6 @@
 {
   "name": "@amaters/sdk",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "TypeScript SDK for AmateRS - Fully Homomorphic Encrypted Database",
   "main": "dist/node/index.js",
   "module": "dist/web/index.js",

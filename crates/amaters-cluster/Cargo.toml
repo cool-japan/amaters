@@ -29,11 +29,21 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hkdf = { workspace = true }
 blake3 = { workspace = true }
+oxicode = { workspace = true }
 thiserror = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tracing-test = { workspace = true }
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "cluster_bench"
+harness = false
 
 [lints]
 workspace = true

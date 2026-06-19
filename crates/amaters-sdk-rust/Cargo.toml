@@ -30,7 +30,7 @@ tracing = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 uuid = { workspace = true }
-tfhe = { workspace = true, optional = true }
+tfhe = { workspace = true, optional = true, features = ["boolean", "shortint", "integer"] }
 serde = { workspace = true, optional = true }
 oxicode = { workspace = true, optional = true }
 

@@ -1,6 +1,6 @@
 # amaters-core TODO
 
-## v0.2.0 Status (Alpha) - 429 tests passing
+## v0.2.2 Status (Alpha) - 481 tests passing
 
 ---
 
@@ -66,8 +66,24 @@
 - [x] Algebraic simplification
 - [x] Dependency graph analysis (`DependencyGraph`, `NodeId`)
 - [x] `OptimizationStats`
-- [ ] Bootstrap minimization (gate fusion, operation reordering) - future
-- [ ] Parallelism analysis (independent operation identification) - future
+- [x] Bootstrap minimization (gate fusion, operation reordering) - future (planned 2026-06-13)
+  - **Goal:** `bootstrap_minimization_pass` genuinely lowers multiplicative/bootstrap depth by re-balancing commutative-associative chains; `reorder_for_bootstrap_efficiency` (currently a structural no-op) performs real operation reordering.
+  - **Design:** Gate-cost model (Mul/Compare = 1 bootstrap; Add/And/Or/Xor/Not = 0). Flatten associative+commutative chains (`Add`, `Mul`, `And`, `Or`, `Xor`) into lists, build balanced reduction trees to minimize multiplicative depth; hoist cheap ops before expensive ones. Strict op-class guard: never reorder across non-commutative ops (`Sub`, comparison operand order). Update `optimized_bootstrap_count`, `optimized_depth`, `gates_fused` in `OptimizationStats`.
+  - **Files:** `src/compute/optimizer.rs`, `src/compute/optimizer_tests.rs`
+  - **Tests:** `test_bootstrap_minimization_real_reordering` (structured circuit shows bootstrap-count and depth reduction); `test_bootstrap_semantic_equivalence` (evaluate pre/post via `FheExecutor` + real keys, assert equal outputs — gated `#[cfg(feature="compute")]`)
+  - **Risk:** Semantics drift if non-commutative ops are reordered. Mitigation: explicit allowlist of commutative ops; equivalence property test.
+- [x] Parallelism analysis (independent operation identification) - future (planned 2026-06-13)
+  - **Goal:** Deepen `analyze_parallelism`: common-subexpression value-numbering (dedupe identical subtrees sharing a `NodeId`), explicit `topological_order()` method, O(n) memoized critical-path, and an optional rayon parallel-evaluation path that consumes `parallel_groups`.
+  - **Design:** Structural hash → shared `NodeId`s (fix the unused `node_id_map` in `build_dependency_graph`); export topo-order as `Vec<NodeId>`; memoize `find_critical_path` (currently recursive, O(n·path)). Optional `FheExecutor::execute_parallel` behind `parallel` feature, setting tfhe server key per rayon worker via thread-local.
+  - **Files:** `src/compute/optimizer.rs`, `src/compute/mod.rs` (optional parallel exec path), `src/compute/optimizer_tests.rs`
+  - **Tests:** `test_cse_deduplication` (identical subtrees share NodeId); `test_topological_order_respects_deps` (no node before its deps); `test_parallel_eval_matches_sequential` (gated `#[cfg(all(feature="compute", feature="parallel"))]`)
+  - **Risk:** tfhe server key is thread-local; setting it per worker requires care. Mitigation: set per rayon worker at scope entry; document thread constraint; keep analysis-only path if parallel eval is not feasible.
+- [x] N-ary gate fusion IR + real TFHE circuit constants (planned 2026-06-13)
+  - **Goal:** (a) Add `CircuitNode::NaryOp` variant for associative ops so gate fusion produces real multi-input nodes. (b) Replace insecure XOR/FNV keystream `encrypt_constant`/`decrypt_constant`/`derive_keystream` (`circuit.rs:587-796`) with TFHE trivial encryption (`encrypt_trivial`) — the canonical public-constant primitive.
+  - **Design:** `CircuitNode::NaryOp { op: BinaryOperator, operands: Vec<CircuitNode> }` (associative+commutative only). Extend type inference, `compute_depth`, `count_gates`, and `FheExecutor::execute_node` (fold over operands). `BinaryOp` stays canonical; `NaryOp` is optimization-only. For constants: `EncryptedConstant` carries a trivially-encrypted ciphertext; `FheExecutor` decodes and evaluates correctly; insecure keystream deleted.
+  - **Files:** `src/compute/circuit.rs`, `src/compute/mod.rs`, `src/compute/optimizer.rs` (fusion pass), tests
+  - **Tests:** `test_nary_fusion_nested_add`; `test_nary_executor_correctness` (compute); `test_trivial_constant_fhe_evaluation` (encrypt trivial, use in circuit, decrypt result matches expected); `test_circuit_depth_with_nary`
+  - **Risk:** IR ripple to all match arms; circuit.rs may exceed 2000 lines — run `splitrs` if needed. Constants as trivial ciphertexts are public by design (no confidentiality).
 
 ### Query Planner
 - [x] `LogicalPlan` / `PhysicalPlan`
@@ -86,13 +102,20 @@
 ## Phase 4: Advanced Features [PLANNED]
 
 ### I/O Optimization
-- [ ] `io_uring` integration (Linux) - async file operations, batched I/O, direct I/O
-- [ ] Prefetching strategies for mmap workloads
+- [x] `io_uring` WAL writer (Linux) - `UringWalWriter` with feature `io-uring`; async file operations for WAL (done 0.2.2)
+- [x] Prefetching strategies for mmap workloads (done 2026-06-14)
+  - **Note (2026-06-14):** `PrefetchConfig { read_ahead_blocks: usize, use_madvise: bool }` added to `lsm_tree.rs` with `impl Default` (4 blocks, madvise off by default for Pure Rust portability). `LsmTree::with_prefetch(config)` builder method stores the config for use during sequential range scans. Re-exported from `storage::mod.rs`. Tests: `test_prefetch_config_default`, `test_lsm_tree_with_prefetch_config`. OS-level madvise is already available via `MmapPrefetcher::advise` (feature `mmap`).
 
 ### Query Optimization
-- [ ] Cost-based optimizer enhancements (predicate pushdown, join optimization)
-- [ ] Encrypted index structures
-- [ ] Index maintenance automation
+- [x] Cost-based optimizer enhancements (predicate pushdown, join optimization) (planned 2026-06-13)
+  - **Goal:** (a) Selectivity-aware predicate pushdown: split `And` conjunctions, push key-range-extractable conjuncts to `RangeScan`, column-pushable conjuncts past `Project`, remainder reordered cheap+selective-first. (b) Greenfield join optimization: 2-way `Join` with cost-based order + physical plan choice (`NestedLoopJoin` vs `HashJoin`).
+  - **Design:** Predicate pushdown — add per-op heuristic selectivity + fhe-cost to `PlannerStats`; `push_predicates_down` splits `And`, routes each conjunct independently. Join — add `LogicalPlan::Join { left, right, on: Predicate, join_type: JoinType }` and `PhysicalPlan::{NestedLoopJoin, HashJoin}`; cost model picks smaller build side; FHE constraint: `HashJoin` only for plaintext keys, `NestedLoopJoin` for encrypted keys. Pushdown into join inputs.
+  - **Files:** `src/compute/planner.rs`, `src/types/query.rs` (if `Query::Join` surface needed). If planner.rs exceeds 2000 lines after changes → split via `splitrs`.
+  - **Tests:** `test_conjunction_split_key_to_range_scan`; `test_predicate_reorder_cheap_first`; `test_join_cost_picks_smaller_build_side`; `test_join_hash_vs_nested_loop_selection`; `test_join_pushdown_into_inputs`; `test_join_explain_output`
+  - **Risk:** Unknown encrypted-key selectivity; join IR is greenfield. Mitigation: conservative selectivity defaults; nested-loop as correct fallback; hash join gated to plaintext keys.
+- [x] Encrypted index structures
+- [x] Index maintenance automation
+- [x] `IndexExtractor` trait — automated secondary index maintenance in `LsmTreeStorage` and `MemoryStorage` (done 0.2.2)
 
 ### Memory Management
 - [x] Buffer pool (reuse allocations, configurable size) (planned 2026-04-16)
@@ -117,8 +140,8 @@
   - **Tests:** `test_op_counter_increments`, `test_latency_histogram_records`
   - **Risk:** Metrics must not add measurable latency to hot path.
   - **Refinement (2026-04-17):** Landed as hand-rolled AtomicU64 facade with Prometheus text export; no metrics-rs dep, pure Rust.
-- [ ] Distributed tracing support (span annotations)
-- [ ] CPU/memory profiling integration
+- [x] Distributed tracing support (span annotations)
+- [x] CPU/memory profiling integration
 
 ---
 
@@ -131,19 +154,31 @@
   - **Files:** `crates/amaters-core/tests/crash_recovery_tests.rs` (new)
   - **Tests:** `test_recovery_all_committed`, `test_recovery_partial_wal`, `test_recovery_empty_wal`
   - **Risk:** Temp dir cleanup must happen in test teardown.
-- [ ] Concurrency stress tests
-- [ ] Chaos engineering (random node failures, disk failures)
+- [x] Concurrency stress tests
+- [x] Chaos engineering (random node failures, disk failures) (completed 2026-06-14)
+  - **Goal:** Inject extreme conditions (large keys, 100K ops, corrupted bytes, 16-thread concurrency) to verify no panics and clear error returns.
+  - **Design:** 7 tests covering: nonexistent path tolerance, 64KiB key, 100K insert volume, deserialization of corrupted data, 16-thread × 1000 ProfilingGuard, empty-index lookup, remove-of-ghost-key.
+  - **Files:** `src/storage/chaos_tests.rs` (new), `src/storage/mod.rs` (wired `mod chaos_tests`)
 
 ### Security
 - [ ] Formal security audit
-- [ ] Constant-time operation verification
+- [x] Constant-time operation verification
 - [ ] Side-channel analysis
-- [ ] Fuzzing (cargo-fuzz)
+- [x] Fuzzing (cargo-fuzz)
 
 ### Documentation
-- [ ] Comprehensive API examples
-- [ ] Architecture diagrams (component, data flow)
-- [ ] Performance tuning guide
+- [x] Register and extend FHE benchmark suite (done 2026-06-13)
+  - **Goal:** Wire `benches/fhe_benchmarks.rs` (exists but not registered in Cargo.toml) as a `[[bench]]`; add optimizer benchmark groups for bootstrap-reduction, parallelism analysis, and NaryOp fusion.
+  - **Design:** Add `[[bench]] name = "fhe_benchmarks" harness = false` to `amaters-core/Cargo.toml` (compute-feature-gated via a `cfg_attr` or inline comment). Add criterion groups: `bench_circuit_optimize` (constant-fold + bootstrap + fusion), `bench_parallelism_analysis` (dep graph build + topo sort at N=10/100/1000 nodes).
+  - **Files:** `amaters-core/Cargo.toml`, `benches/fhe_benchmarks.rs`
+  - **Tests:** `cargo bench -p amaters-core --features compute --no-run` builds without error.
+  - **Risk:** Long compile time for tfhe. Mitigation: feature-gate; validate with `--no-run`; leave off default bench run in CI.
+- [x] Comprehensive API examples (completed 2026-06-14)
+  - **Goal:** Rustdoc `# Example` sections with compile-checked examples on key public types.
+  - **Files:** `src/storage/encrypted_index.rs` (`EncryptedIndex::new`), `src/crypto/constant_time.rs` (`constant_time_eq`), `src/profiling.rs` (`ProfilingGuard::new`)
+  - **Tests:** `cargo test --doc -p amaters-core` — 5 doctests pass
+- [x] Architecture diagrams (component, data flow) — 2026-06-15 (ASCII box diagrams in //! module docs: Iwato LSM-tree in storage/mod.rs, Yata compute pipeline in compute/mod.rs)
+- [x] Performance tuning guide — 2026-06-15
 
 ---
 

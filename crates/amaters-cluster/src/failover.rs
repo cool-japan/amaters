@@ -11,6 +11,7 @@
 
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
@@ -398,6 +399,209 @@ impl std::fmt::Debug for FailoverCoordinator {
     }
 }
 
+// ── AlertEvent ──────────────────────────────────────────────────────
+
+/// An event that the alerting subsystem can deliver to registered callbacks.
+#[derive(Debug, Clone)]
+pub enum AlertEvent {
+    /// A node has been presumed failed (heartbeat timeout or explicit mark).
+    NodeFailed { node_id: NodeId },
+    /// A previously-failed node is now reachable again.
+    NodeRecovered { node_id: NodeId },
+    /// Raft leader changed (old may be `None` for the very first election).
+    LeaderChanged {
+        old_leader: Option<NodeId>,
+        new_leader: NodeId,
+    },
+    /// The cluster lost quorum — fewer than half of members are reachable.
+    QuorumLost {
+        cluster_size: usize,
+        reachable: usize,
+    },
+    /// A follower is lagging far behind the leader's commit index.
+    SlowReplication { follower: NodeId, lag_entries: u64 },
+}
+
+// ── AlertCallback / AlertManager ────────────────────────────────────
+
+/// A thread-safe, shared callback that receives [`AlertEvent`]s.
+pub type AlertCallback = Arc<dyn Fn(AlertEvent) + Send + Sync>;
+
+/// Fan-out alerting hub.
+///
+/// Register callbacks via [`register`][AlertManager::register]; emit events via
+/// [`emit`][AlertManager::emit].  Both methods are safe to call from multiple
+/// threads concurrently.
+pub struct AlertManager {
+    callbacks: Mutex<Vec<AlertCallback>>,
+}
+
+impl AlertManager {
+    /// Create an empty manager with no registered callbacks.
+    pub fn new() -> Self {
+        Self {
+            callbacks: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Register a new callback.
+    ///
+    /// The callback will be invoked synchronously (in the calling thread) for
+    /// every subsequent [`emit`][Self::emit] call.
+    pub fn register(&self, callback: AlertCallback) {
+        self.callbacks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(callback);
+    }
+
+    /// Emit an event to all registered callbacks.
+    ///
+    /// Callbacks are invoked in registration order.  A panicking callback does
+    /// not prevent the remaining callbacks from being invoked.
+    pub fn emit(&self, event: AlertEvent) {
+        let guard = self.callbacks.lock().unwrap_or_else(|e| e.into_inner());
+        for cb in guard.iter() {
+            // Use std::panic::catch_unwind so a bad callback cannot poison the
+            // lock or abort the cluster node.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cb(event.clone());
+            }));
+        }
+    }
+}
+
+impl Default for AlertManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for AlertManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.callbacks.lock().map(|g| g.len()).unwrap_or(0);
+        f.debug_struct("AlertManager")
+            .field("callback_count", &count)
+            .finish()
+    }
+}
+
+// ── FailoverController ──────────────────────────────────────────────
+
+/// A higher-level node health monitor that combines heartbeat-timeout
+/// detection with explicit mark/recover operations.
+///
+/// Unlike [`FailoverCoordinator`] (which is tied to the Raft election
+/// machinery), `FailoverController` is a self-contained monitor suitable for
+/// use by the cluster topology dashboard, the alerting subsystem, or external
+/// health-check drivers.
+///
+/// # Thread safety
+///
+/// All methods use internal locks; the struct is `Send + Sync`.
+///
+/// # Test injection
+///
+/// Tests may call `set_last_seen` to back-date the last
+/// heartbeat timestamp for a node without actually waiting.
+pub struct FailoverController {
+    heartbeat_timeout: Duration,
+    last_seen: Mutex<std::collections::HashMap<NodeId, Instant>>,
+    failed_nodes: dashmap::DashSet<NodeId>,
+}
+
+impl FailoverController {
+    /// Create a new controller.
+    ///
+    /// `heartbeat_timeout` — how long a node can go without sending a
+    /// heartbeat before it is considered failed.
+    pub fn new(heartbeat_timeout: Duration) -> Self {
+        Self {
+            heartbeat_timeout,
+            last_seen: Mutex::new(std::collections::HashMap::new()),
+            failed_nodes: dashmap::DashSet::new(),
+        }
+    }
+
+    /// Record that a heartbeat was received from `node_id`.
+    ///
+    /// If the node was previously marked as failed it is automatically
+    /// recovered.
+    pub fn record_heartbeat(&self, node_id: NodeId) {
+        self.last_seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(node_id, Instant::now());
+        self.failed_nodes.remove(&node_id);
+    }
+
+    /// Check all known nodes; return the IDs of nodes that have not sent a
+    /// heartbeat within the timeout window.
+    ///
+    /// Nodes detected here are also added to the internal failed set (visible
+    /// via [`is_failed`][Self::is_failed] / [`failed_nodes`][Self::failed_nodes]).
+    pub fn detect_failed_nodes(&self) -> Vec<NodeId> {
+        let now = Instant::now();
+        let guard = self.last_seen.lock().unwrap_or_else(|e| e.into_inner());
+        let mut failed = Vec::new();
+        for (&node_id, &last) in guard.iter() {
+            if now.duration_since(last) >= self.heartbeat_timeout {
+                self.failed_nodes.insert(node_id);
+                failed.push(node_id);
+            }
+        }
+        failed
+    }
+
+    /// Explicitly mark a node as failed (e.g. after Raft loss-of-quorum).
+    pub fn mark_failed(&self, node_id: NodeId) {
+        self.failed_nodes.insert(node_id);
+    }
+
+    /// Mark a node as recovered.
+    ///
+    /// This removes it from the failed set.  Call
+    /// [`record_heartbeat`][Self::record_heartbeat] as well to reset the
+    /// timeout clock.
+    pub fn mark_recovered(&self, node_id: NodeId) {
+        self.failed_nodes.remove(&node_id);
+    }
+
+    /// Return `true` if `node_id` is currently considered failed.
+    pub fn is_failed(&self, node_id: NodeId) -> bool {
+        self.failed_nodes.contains(&node_id)
+    }
+
+    /// Return all currently failed node IDs as a `Vec`.
+    pub fn failed_nodes(&self) -> Vec<NodeId> {
+        self.failed_nodes.iter().map(|r| *r).collect()
+    }
+
+    // ── Test-only helpers ─────────────────────────────────────────────────────
+
+    /// Overwrite the last-seen timestamp for `node_id` to `instant`.
+    ///
+    /// Use this in tests to simulate time advancing without actually sleeping.
+    #[cfg(test)]
+    pub fn set_last_seen(&self, node_id: NodeId, instant: Instant) {
+        self.last_seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(node_id, instant);
+    }
+}
+
+impl std::fmt::Debug for FailoverController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let known = self.last_seen.lock().map(|g| g.len()).unwrap_or(0);
+        f.debug_struct("FailoverController")
+            .field("heartbeat_timeout", &self.heartbeat_timeout)
+            .field("known_nodes", &known)
+            .field("failed_count", &self.failed_nodes.len())
+            .finish()
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -706,6 +910,155 @@ mod tests {
         let dbg = format!("{:?}", coord);
         assert!(dbg.contains("FailoverCoordinator"));
         assert!(dbg.contains("self_id"));
+    }
+
+    // ── FailoverController tests ───────────────────────────────────────────────
+
+    /// After calling `set_last_seen` with a timestamp far in the past,
+    /// `detect_failed_nodes` must report that node as failed.
+    #[test]
+    fn test_failover_controller_detects_timeout() {
+        let timeout = Duration::from_millis(100);
+        let controller = FailoverController::new(timeout);
+
+        // Prime last_seen with a timestamp well before the timeout.
+        let old_instant = Instant::now() - Duration::from_millis(500);
+        controller.set_last_seen(42, old_instant);
+
+        let failed = controller.detect_failed_nodes();
+        assert!(
+            failed.contains(&42),
+            "node 42 should be detected as failed; got {:?}",
+            failed
+        );
+        assert!(controller.is_failed(42), "is_failed(42) should return true");
+    }
+
+    /// A node that is first failed, then recovered, must not appear in the
+    /// failed list.
+    #[test]
+    fn test_failover_controller_recovered_node() {
+        let controller = FailoverController::new(Duration::from_millis(100));
+
+        controller.mark_failed(7);
+        assert!(controller.is_failed(7));
+
+        controller.mark_recovered(7);
+        assert!(
+            !controller.is_failed(7),
+            "node 7 should no longer be failed"
+        );
+        assert!(
+            !controller.failed_nodes().contains(&7),
+            "failed_nodes() must not include recovered node 7"
+        );
+    }
+
+    /// record_heartbeat after a failure should clear the failed status.
+    #[test]
+    fn test_failover_controller_heartbeat_clears_failure() {
+        let controller = FailoverController::new(Duration::from_millis(100));
+        controller.mark_failed(3);
+        assert!(controller.is_failed(3));
+        controller.record_heartbeat(3);
+        assert!(!controller.is_failed(3));
+    }
+
+    // ── AlertManager tests ─────────────────────────────────────────────────────
+
+    /// Emitting one event to two registered callbacks must invoke both.
+    #[test]
+    fn test_alert_manager_emits_to_all_callbacks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let manager = AlertManager::new();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let c1 = Arc::clone(&count);
+        manager.register(Arc::new(move |_evt: AlertEvent| {
+            c1.fetch_add(1, Ordering::Relaxed);
+        }));
+        let c2 = Arc::clone(&count);
+        manager.register(Arc::new(move |_evt: AlertEvent| {
+            c2.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        manager.emit(AlertEvent::NodeFailed { node_id: 5 });
+
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            2,
+            "both callbacks should have been invoked"
+        );
+    }
+
+    /// Registering and emitting from multiple threads must not panic or
+    /// deadlock.
+    #[test]
+    fn test_alert_manager_thread_safe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+
+        let manager = Arc::new(AlertManager::new());
+        let received = Arc::new(AtomicUsize::new(0));
+
+        // Register from multiple threads.
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let mgr = Arc::clone(&manager);
+            let recv = Arc::clone(&received);
+            handles.push(thread::spawn(move || {
+                mgr.register(Arc::new(move |_evt: AlertEvent| {
+                    recv.fetch_add(1, Ordering::Relaxed);
+                }));
+            }));
+        }
+        for h in handles {
+            h.join().expect("register thread must not panic");
+        }
+
+        // Emit from multiple threads simultaneously.
+        let mut emit_handles = Vec::new();
+        for _ in 0..4 {
+            let mgr = Arc::clone(&manager);
+            emit_handles.push(thread::spawn(move || {
+                mgr.emit(AlertEvent::NodeFailed { node_id: 1 });
+            }));
+        }
+        for h in emit_handles {
+            h.join().expect("emit thread must not panic");
+        }
+
+        // 4 emits × 4 callbacks = 16 total invocations.
+        let total = received.load(Ordering::Relaxed);
+        assert_eq!(total, 16, "expected 16 invocations, got {}", total);
+    }
+
+    /// AlertEvent::LeaderChanged carries both old and new leader IDs.
+    #[test]
+    fn test_alert_manager_leader_changed_event() {
+        let manager = AlertManager::new();
+        let events: Arc<Mutex<Vec<AlertEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let ev = Arc::clone(&events);
+        manager.register(Arc::new(move |e: AlertEvent| {
+            ev.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        }));
+
+        manager.emit(AlertEvent::LeaderChanged {
+            old_leader: Some(1),
+            new_leader: 2,
+        });
+
+        let guard = events.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(guard.len(), 1);
+        assert!(matches!(
+            guard[0],
+            AlertEvent::LeaderChanged {
+                old_leader: Some(1),
+                new_leader: 2,
+            }
+        ));
     }
 
     /// After leader loss (set to None), should_redirect returns false because no

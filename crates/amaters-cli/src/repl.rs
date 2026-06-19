@@ -428,6 +428,8 @@ pub enum ReplCommand {
     Stats,
     /// Toggle command timing display
     Timing { enabled: Option<bool> },
+    /// Show query execution plan without running the query
+    Explain { command: String },
     /// Unknown command
     Unknown { input: String },
 }
@@ -522,6 +524,19 @@ impl ReplCommand {
                 },
             },
             "collection" | "coll" => Self::Collection,
+            "explain" => {
+                // Capture everything after "explain"
+                let rest = trimmed["explain".len()..].trim();
+                if rest.is_empty() {
+                    Self::Unknown {
+                        input: "explain requires a command, e.g.: explain get mykey".to_string(),
+                    }
+                } else {
+                    Self::Explain {
+                        command: rest.to_string(),
+                    }
+                }
+            }
             _ => Self::Unknown {
                 input: trimmed.to_string(),
             },
@@ -765,6 +780,7 @@ impl Repl {
                     }
                 }
             }
+            ReplCommand::Explain { command } => Ok(self.cmd_explain(&command)),
             ReplCommand::Unknown { input } => Ok(format!(
                 "{}\nType 'help' for available commands.",
                 red(&format!("Unknown command: {input}"))
@@ -920,6 +936,52 @@ impl Repl {
         ))
     }
 
+    // ---- Explain (local query plan, no server call) ----
+
+    fn cmd_explain(&self, command_str: &str) -> String {
+        use amaters_core::compute::QueryPlanner;
+        use amaters_core::types::{CipherBlob, Key, Query};
+
+        let inner = ReplCommand::parse(command_str);
+        let query = match inner {
+            ReplCommand::Get { key } => Query::Get {
+                collection: self.active_collection.clone(),
+                key: Key::from_str(&key),
+            },
+            ReplCommand::Set { key, value } => Query::Set {
+                collection: self.active_collection.clone(),
+                key: Key::from_str(&key),
+                value: CipherBlob::new(value.into_bytes()),
+            },
+            ReplCommand::Delete { key } => Query::Delete {
+                collection: self.active_collection.clone(),
+                key: Key::from_str(&key),
+            },
+            ReplCommand::Range { start, end } => Query::Range {
+                collection: self.active_collection.clone(),
+                start: Key::from_str(&start),
+                end: Key::from_str(&end),
+            },
+            _ => {
+                return format!(
+                    "{}\nExplain supports: get, set, delete, range",
+                    red(&format!("explain: cannot plan command '{}'", command_str))
+                );
+            }
+        };
+
+        match QueryPlanner::new().plan(&query) {
+            Ok(plan) => format!(
+                "{}\n{}\n\n{}\n{}",
+                cyan("━━ Query Execution Plan ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+                green(&format!("Query: {}", command_str)),
+                plan,
+                cyan("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            ),
+            Err(e) => red(&format!("Planning failed: {e}")),
+        }
+    }
+
     // ---- Display helpers ----
 
     fn print_banner(&self) {
@@ -970,6 +1032,9 @@ impl Repl {
             "    delete <key>         Delete a key (aliases: del, rm)",
             "    range <start> <end>  Range query between keys (alias: scan)",
             "    keys                 List all keys (alias: ls)",
+            "",
+            "  Query planner:",
+            "    explain <command>    Show execution plan without running (get, set, delete, range)",
             "",
             "  Collection:",
             "    use <collection>     Switch active collection",
@@ -1466,6 +1531,66 @@ mod tests {
     fn test_parse_command_unknown() {
         let cmd = ReplCommand::parse("foobar");
         assert!(matches!(cmd, ReplCommand::Unknown { .. }));
+    }
+
+    #[test]
+    fn test_parse_explain_get() {
+        let cmd = ReplCommand::parse("explain get mykey");
+        assert!(
+            matches!(cmd, ReplCommand::Explain { ref command } if command == "get mykey"),
+            "got {:?}",
+            cmd
+        );
+    }
+
+    #[test]
+    fn test_parse_explain_range() {
+        let cmd = ReplCommand::parse("explain range a z");
+        assert!(matches!(cmd, ReplCommand::Explain { .. }), "got {:?}", cmd);
+    }
+
+    #[test]
+    fn test_parse_explain_empty_is_unknown() {
+        let cmd = ReplCommand::parse("explain");
+        assert!(matches!(cmd, ReplCommand::Unknown { .. }), "got {:?}", cmd);
+    }
+
+    #[test]
+    fn test_cmd_explain_get_produces_plan() {
+        let config = ReplConfig::default();
+        let repl = Repl::new(config);
+        let output = repl.cmd_explain("get some_key");
+        assert!(
+            output.contains("PointLookup")
+                || output.contains("PointGet")
+                || output.contains("Scan"),
+            "explain get should show a plan: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_cmd_explain_range_produces_plan() {
+        let config = ReplConfig::default();
+        let repl = Repl::new(config);
+        let output = repl.cmd_explain("range start end");
+        assert!(
+            output.contains("RangeScan") || output.contains("Scan") || output.contains("Range"),
+            "explain range should show a plan: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_cmd_explain_unknown_command_is_graceful() {
+        let config = ReplConfig::default();
+        let repl = Repl::new(config);
+        let output = repl.cmd_explain("unknown_cmd");
+        assert!(
+            output.contains("Explain supports") || output.contains("cannot plan"),
+            "unknown explain cmd should give helpful message: {}",
+            output
+        );
     }
 
     #[test]

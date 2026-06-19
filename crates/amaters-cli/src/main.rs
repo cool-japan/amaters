@@ -3,6 +3,7 @@
 //! Command-line interface for interacting with AmateRS encrypted database.
 
 mod admin;
+mod aql_parser;
 mod batch;
 mod client;
 mod config;
@@ -687,6 +688,10 @@ async fn execute_query(
     _cursor: Option<String>,
     format: OutputFormat,
 ) -> Result<()> {
+    // Parse and validate the AQL filter expression before sending to server.
+    let _predicate =
+        aql_parser::parse_filter(filter).map_err(|e| anyhow::anyhow!("AQL parse error: {}", e))?;
+
     let results = client
         .query(filter)
         .await

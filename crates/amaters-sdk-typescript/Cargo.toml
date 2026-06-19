@@ -46,7 +46,7 @@ serde-wasm-bindgen = "0.6"
 thiserror = { workspace = true }
 
 # Async runtime for WASM + native HTTP transport
-tokio = { version = "1.50", default-features = false, features = ["sync", "net", "io-util", "time", "rt"] }
+tokio = { version = "1.52", default-features = false, features = ["sync", "net", "io-util", "time", "rt"] }
 
 # Timers for WASM
 gloo-timers = { version = "0.4", features = ["futures"] }

@@ -55,10 +55,10 @@ Add AmateRS to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-amaters = "0.2"
+amaters = "0.2.2"
 
 # Or with specific features
-amaters = { version = "0.2", features = ["full"] }
+amaters = { version = "0.2.2", features = ["full"] }
 ```
 
 > **Status**: Alpha — API is stabilising. Not yet recommended for production use.
@@ -159,30 +159,30 @@ If you need only specific functionality, you can use the individual crates direc
 ```toml
 [dependencies]
 # Core types and storage
-amaters-core = "0.2"
+amaters-core = "0.2.2"
 
 # Network layer
-amaters-net = "0.2"
+amaters-net = "0.2.2"
 
 # Consensus
-amaters-cluster = "0.2"
+amaters-cluster = "0.2.2"
 
 # Client SDK
-amaters-sdk-rust = "0.2"
+amaters-sdk-rust = "0.2.2"
 ```
 
 ## Development Status
 
-**Current Version**: 0.2.0 (Alpha)
+**Current Version**: 0.2.2 (Alpha)
 
 - Core storage engine (Iwato) - LSM-Tree with WAL and compaction
 - FHE compute engine (Yata) - TFHE-rs integration with predicate evaluation
 - Network layer (Musubi) - gRPC with TLS/mTLS
-- Rust SDK - connection management, caching, pagination, sorting, batch operations, range queries (112 tests, 164 pub items)
-- TypeScript/WASM SDK - dual transport (gRPC + HTTP/1.1), batch operations, retry logic (84 tests, 189 pub items)
-- Python SDK - async PyO3 bindings, connection, query, batch operations
-- Facade crate (this crate) - re-exports from all component crates (34 tests)
-- CLI tool with admin capabilities
+- Rust SDK - connection management, caching, pagination, sorting, batch operations, range queries (131 tests, 164 pub items)
+- TypeScript/WASM SDK - dual transport (gRPC + HTTP/1.1), batch operations, retry logic (91 tests, 189 pub items)
+- Python SDK - async PyO3 bindings, connection, query, batch operations (80 tests)
+- Facade crate (this crate) - re-exports from all component crates (30 tests)
+- CLI tool with admin capabilities, REPL with explain command (208 tests)
 
 ## Contributing
 

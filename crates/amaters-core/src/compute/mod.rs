@@ -34,6 +34,16 @@
 //! let executor = FheExecutor::new();
 //! let result = executor.execute(&circuit, &inputs)?;
 //! ```
+//!
+//! ## Compute Pipeline
+//!
+//! ```text
+//!  Query → Predicate → CircuitNode → CircuitOptimizer → FheExecutor
+//!                          │                │
+//!                   (BinaryOp,       (bootstrap-min,
+//!                    UnaryOp,         gate fusion,
+//!                    Compare)         parallelism)
+//! ```
 
 pub mod circuit;
 pub mod gpu;
@@ -65,6 +75,10 @@ pub use predicate::{PredicateCompiler, compile_predicate};
 use crate::error::{AmateRSError, ErrorContext, Result};
 use crate::types::CipherBlob;
 use std::collections::HashMap;
+#[cfg(feature = "compute")]
+use tfhe::prelude::*;
+#[cfg(feature = "compute")]
+use tfhe::{FheBool, FheUint8, FheUint16, FheUint32, FheUint64};
 
 /// FHE executor for circuit execution
 ///
@@ -179,6 +193,41 @@ impl FheExecutor {
         inputs: &HashMap<String, CipherBlob>,
         variable_types: &HashMap<String, EncryptedType>,
     ) -> Result<EncryptedValue> {
+        let node_type_str = match node {
+            CircuitNode::Load(_) => "load",
+            CircuitNode::Constant(_) => "constant",
+            CircuitNode::EncryptedConstant { .. } => "encrypted_constant",
+            CircuitNode::BinaryOp { op, .. } => match op {
+                BinaryOperator::Add => "binary_add",
+                BinaryOperator::Sub => "binary_sub",
+                BinaryOperator::Mul => "binary_mul",
+                BinaryOperator::And => "binary_and",
+                BinaryOperator::Or => "binary_or",
+                BinaryOperator::Xor => "binary_xor",
+            },
+            CircuitNode::UnaryOp { op, .. } => match op {
+                UnaryOperator::Not => "unary_not",
+                UnaryOperator::Neg => "unary_neg",
+            },
+            CircuitNode::Compare { op, .. } => match op {
+                CompareOperator::Eq => "compare_eq",
+                CompareOperator::Ne => "compare_ne",
+                CompareOperator::Lt => "compare_lt",
+                CompareOperator::Le => "compare_le",
+                CompareOperator::Gt => "compare_gt",
+                CompareOperator::Ge => "compare_ge",
+            },
+            CircuitNode::NaryOp { op, .. } => match op {
+                BinaryOperator::And => "nary_and",
+                BinaryOperator::Or => "nary_or",
+                BinaryOperator::Add => "nary_add",
+                BinaryOperator::Mul => "nary_mul",
+                BinaryOperator::Sub => "nary_sub",
+                BinaryOperator::Xor => "nary_xor",
+            },
+        };
+        let _span = tracing::debug_span!("amaters.fhe.gate", "amaters.gate.type" = node_type_str,)
+            .entered();
         match node {
             CircuitNode::Load(name) => {
                 let blob = inputs.get(name).ok_or_else(|| {
@@ -214,15 +263,57 @@ impl FheExecutor {
                 }
             }
 
-            CircuitNode::Constant(_value) => {
-                // Plaintext constants in FHE context are not directly supported.
-                // Use encrypt_circuit_constants() to pre-process the circuit before
-                // execution, converting all Constant nodes to EncryptedConstant.
-                Err(AmateRSError::FheComputation(ErrorContext::new(
-                    "Plaintext constants cannot be used in FHE execution. \
-                     Use encrypt_circuit_constants() to encrypt constants before evaluation."
-                        .to_string(),
-                )))
+            CircuitNode::Constant(value) => {
+                // Use TFHE trivial encryption to create a public constant ciphertext.
+                // Trivially-encrypted values are public (no confidentiality) and
+                // can be used in FHE computations as circuit constants.
+                match value {
+                    CircuitValue::Bool(b) => {
+                        let fhe_bool = FheBool::try_encrypt_trivial(*b).map_err(|e| {
+                            AmateRSError::FheComputation(ErrorContext::new(format!(
+                                "Failed to trivially encrypt bool constant: {}",
+                                e
+                            )))
+                        })?;
+                        Ok(EncryptedValue::Bool(EncryptedBool::from_fhe(fhe_bool)))
+                    }
+                    CircuitValue::U8(v) => {
+                        let fhe_val = FheUint8::try_encrypt_trivial(*v).map_err(|e| {
+                            AmateRSError::FheComputation(ErrorContext::new(format!(
+                                "Failed to trivially encrypt u8 constant: {}",
+                                e
+                            )))
+                        })?;
+                        Ok(EncryptedValue::U8(EncryptedU8::from_fhe(fhe_val)))
+                    }
+                    CircuitValue::U16(v) => {
+                        let fhe_val = FheUint16::try_encrypt_trivial(*v).map_err(|e| {
+                            AmateRSError::FheComputation(ErrorContext::new(format!(
+                                "Failed to trivially encrypt u16 constant: {}",
+                                e
+                            )))
+                        })?;
+                        Ok(EncryptedValue::U16(EncryptedU16::from_fhe(fhe_val)))
+                    }
+                    CircuitValue::U32(v) => {
+                        let fhe_val = FheUint32::try_encrypt_trivial(*v).map_err(|e| {
+                            AmateRSError::FheComputation(ErrorContext::new(format!(
+                                "Failed to trivially encrypt u32 constant: {}",
+                                e
+                            )))
+                        })?;
+                        Ok(EncryptedValue::U32(EncryptedU32::from_fhe(fhe_val)))
+                    }
+                    CircuitValue::U64(v) => {
+                        let fhe_val = FheUint64::try_encrypt_trivial(*v).map_err(|e| {
+                            AmateRSError::FheComputation(ErrorContext::new(format!(
+                                "Failed to trivially encrypt u64 constant: {}",
+                                e
+                            )))
+                        })?;
+                        Ok(EncryptedValue::U64(EncryptedU64::from_fhe(fhe_val)))
+                    }
+                }
             }
 
             CircuitNode::EncryptedConstant {
@@ -390,6 +481,63 @@ impl FheExecutor {
                     ))),
                 }
             }
+            CircuitNode::NaryOp { op, operands } => {
+                if operands.is_empty() {
+                    return Err(AmateRSError::FheComputation(ErrorContext::new(
+                        "NaryOp has no operands".to_string(),
+                    )));
+                }
+                // Evaluate all operands
+                let mut values: Vec<EncryptedValue> = Vec::with_capacity(operands.len());
+                for operand in operands {
+                    values.push(self.execute_node(operand, inputs, variable_types)?);
+                }
+                // Fold using binary op
+                let mut iter = values.into_iter();
+                let first = iter.next().ok_or_else(|| {
+                    AmateRSError::FheComputation(ErrorContext::new(
+                        "NaryOp has no operands after collection".to_string(),
+                    ))
+                })?;
+                iter.try_fold(first, |acc, next| match (op, acc, next) {
+                    (&BinaryOperator::And, EncryptedValue::Bool(l), EncryptedValue::Bool(r)) => {
+                        Ok(EncryptedValue::Bool(l.and(&r)))
+                    }
+                    (&BinaryOperator::Or, EncryptedValue::Bool(l), EncryptedValue::Bool(r)) => {
+                        Ok(EncryptedValue::Bool(l.or(&r)))
+                    }
+                    (&BinaryOperator::Xor, EncryptedValue::Bool(l), EncryptedValue::Bool(r)) => {
+                        Ok(EncryptedValue::Bool(l.xor(&r)))
+                    }
+                    (&BinaryOperator::Add, EncryptedValue::U8(l), EncryptedValue::U8(r)) => {
+                        Ok(EncryptedValue::U8(l.add(&r)))
+                    }
+                    (&BinaryOperator::Mul, EncryptedValue::U8(l), EncryptedValue::U8(r)) => {
+                        Ok(EncryptedValue::U8(l.mul(&r)))
+                    }
+                    (&BinaryOperator::Add, EncryptedValue::U16(l), EncryptedValue::U16(r)) => {
+                        Ok(EncryptedValue::U16(l.add(&r)))
+                    }
+                    (&BinaryOperator::Mul, EncryptedValue::U16(l), EncryptedValue::U16(r)) => {
+                        Ok(EncryptedValue::U16(l.mul(&r)))
+                    }
+                    (&BinaryOperator::Add, EncryptedValue::U32(l), EncryptedValue::U32(r)) => {
+                        Ok(EncryptedValue::U32(l.add(&r)))
+                    }
+                    (&BinaryOperator::Mul, EncryptedValue::U32(l), EncryptedValue::U32(r)) => {
+                        Ok(EncryptedValue::U32(l.mul(&r)))
+                    }
+                    (&BinaryOperator::Add, EncryptedValue::U64(l), EncryptedValue::U64(r)) => {
+                        Ok(EncryptedValue::U64(l.add(&r)))
+                    }
+                    (&BinaryOperator::Mul, EncryptedValue::U64(l), EncryptedValue::U64(r)) => {
+                        Ok(EncryptedValue::U64(l.mul(&r)))
+                    }
+                    _ => Err(AmateRSError::FheComputation(ErrorContext::new(
+                        "Type mismatch in NaryOp".to_string(),
+                    ))),
+                })
+            }
         }
     }
 }
@@ -546,5 +694,46 @@ mod tests {
         assert!(result.is_err());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_trivial_constant_in_circuit() -> Result<()> {
+        // Trivially-encrypted constants (via CircuitNode::Constant) should work
+        // in FHE circuits via try_encrypt_trivial.
+        let keypair = FheKeyPair::generate()?;
+        keypair.set_as_global_server_key();
+
+        // Build circuit: a + Constant(5u8)
+        let mut builder = CircuitBuilder::new();
+        builder.declare_variable("a", EncryptedType::U8);
+
+        let a_node = builder.load("a");
+        let const_node = builder.constant(CircuitValue::U8(5));
+        let sum_node = builder.add(a_node, const_node);
+
+        let circuit = builder.build(sum_node)?;
+
+        let a = EncryptedU8::encrypt(3, keypair.client_key());
+
+        let mut inputs = HashMap::new();
+        inputs.insert("a".to_string(), a.to_cipher_blob()?);
+
+        let executor = FheExecutor::new();
+        let result_blob = executor.execute(&circuit, &inputs)?;
+
+        let result = EncryptedU8::from_cipher_blob(&result_blob)?;
+        assert_eq!(result.decrypt(keypair.client_key()), 8);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    #[test]
+    fn test_execute_node_emits_trace() {
+        // Smoke test: span creation must not panic (no-op without subscriber).
+        let _span =
+            tracing::debug_span!("amaters.fhe.gate", "amaters.gate.type" = "test").entered();
     }
 }

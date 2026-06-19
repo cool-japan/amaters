@@ -1,9 +1,9 @@
 # AmateRS - The Sovereign Data Infrastructure
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.1-green.svg)](https://github.com/cool-japan/amaters)
+[![Version](https://img.shields.io/badge/version-0.2.2-green.svg)](https://github.com/cool-japan/amaters)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-2072%20passing-brightgreen.svg)](https://github.com/cool-japan/amaters)
+[![Tests](https://img.shields.io/badge/tests-2473%20passing-brightgreen.svg)](https://github.com/cool-japan/amaters)
 
 **AmateRS** is a next-generation distributed database with Fully Homomorphic Encryption (FHE) capabilities, enabling computation on encrypted data without ever exposing plaintext to servers.
 
@@ -120,8 +120,8 @@ Add as a dependency in `Cargo.toml`:
 
 ```toml
 [dependencies]
-amaters = "0.2.1"
-amaters-sdk-rust = "0.2.1"
+amaters = "0.2.2"
+amaters-sdk-rust = "0.2.2"
 ```
 
 ### Running the Server
@@ -216,13 +216,13 @@ amaters/
 
 ## Development Status
 
-**Current Version**: 0.2.1 (2026-05-09)
+**Current Version**: 0.2.2 (2026-06-19)
 **Edition**: 2024
 **rust-version**: 1.85
 **License**: Apache-2.0
 
 - 9 crates, 186 Rust source files, 85,537 Rust SLoC
-- 2,072 tests passing, 0 failures, 24 skipped
+- 2,473 tests passing, 0 failures, 24 skipped
 - 0 `todo!()`/`unimplemented!()` stubs
 - Estimated development cost: $2.47M (COCOMO)
 

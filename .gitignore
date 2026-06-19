@@ -1,6 +1,7 @@
 # Rust
 /target/
 **/*.rs.bk
+**/*.rlib
 *.pdb
 **/Cargo.lock  # For libraries
 Cargo.lock
@@ -85,4 +86,8 @@ dmypy.json
 **/*.pyi.bak
 _maturin/
 
+# Node modules
+**/node_modules/
+
+# Miscs
 target

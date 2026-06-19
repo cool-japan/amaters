@@ -131,6 +131,62 @@ impl DependencyGraph {
         let total: usize = self.parallel_groups.iter().map(|g| g.len()).sum();
         total as f64 / self.parallel_groups.len() as f64
     }
+
+    /// Returns nodes in topological order (dependencies before dependents)
+    pub fn topological_order(&self) -> Vec<NodeId> {
+        self.compute_topological_order()
+    }
+
+    fn compute_topological_order(&self) -> Vec<NodeId> {
+        // Kahn's algorithm: in_degree[node] = number of prerequisites (dependencies)
+        let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
+
+        // Initialize all nodes to in-degree = number of their dependencies
+        for (node_id, deps) in &self.dependencies {
+            *in_degree.entry(*node_id).or_insert(0) = deps.len();
+            // Ensure deps are also in the map
+            for dep_id in deps {
+                in_degree.entry(*dep_id).or_insert(0);
+            }
+        }
+
+        // Start with nodes that have no dependencies (leaves)
+        let mut queue: std::collections::BTreeSet<NodeId> = in_degree
+            .iter()
+            .filter(|&(_, deg)| *deg == 0)
+            .map(|(&id, _)| id)
+            .collect();
+
+        let mut result = Vec::new();
+
+        // Build reverse edges: for each dep, who depends on it?
+        let mut dependents: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for (node_id, deps) in &self.dependencies {
+            for dep_id in deps {
+                dependents.entry(*dep_id).or_default().push(*node_id);
+            }
+        }
+
+        while let Some(&node_id) = queue.iter().next() {
+            queue.remove(&node_id);
+            result.push(node_id);
+
+            if let Some(dep_nodes) = dependents.get(&node_id) {
+                for &dependent_id in dep_nodes {
+                    if let Some(deg) = in_degree.get_mut(&dependent_id) {
+                        if *deg > 0 {
+                            *deg -= 1;
+                            if *deg == 0 {
+                                queue.insert(dependent_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
 }
 
 impl Default for DependencyGraph {
@@ -288,6 +344,15 @@ impl CircuitOptimizer {
                 // Comparisons typically require bootstrap
                 left_bootstraps + right_bootstraps + 1
             }
+            CircuitNode::NaryOp { op, operands } => {
+                let operand_bootstraps: usize =
+                    operands.iter().map(|o| self.count_bootstraps(o)).sum();
+                let op_bootstraps = match op {
+                    BinaryOperator::Mul => operands.len().saturating_sub(1),
+                    _ => 0,
+                };
+                operand_bootstraps + op_bootstraps
+            }
         }
     }
 
@@ -344,6 +409,17 @@ impl CircuitOptimizer {
                     op,
                     left: Box::new(left),
                     right: Box::new(right),
+                }
+            }
+
+            CircuitNode::NaryOp { op, operands } => {
+                let new_operands: Vec<CircuitNode> = operands
+                    .into_iter()
+                    .map(|o| self.constant_folding_pass(o))
+                    .collect();
+                CircuitNode::NaryOp {
+                    op,
+                    operands: new_operands,
                 }
             }
 
@@ -548,19 +624,67 @@ impl CircuitOptimizer {
 
     /// Gate fusion optimization pass
     ///
-    /// Combines adjacent operations to reduce overhead. For example:
-    /// - (a + b) + c can be fused into a single multi-input addition
-    /// - Multiple consecutive NOT operations can be eliminated
+    /// Combines adjacent operations to reduce overhead:
+    /// - Associative+commutative same-op chains are flattened into NaryOp nodes
+    /// - Multiple consecutive NOT operations are eliminated
     fn gate_fusion_pass(&mut self, node: CircuitNode) -> CircuitNode {
         match node {
             CircuitNode::BinaryOp { op, left, right } => {
                 let left = self.gate_fusion_pass(*left);
                 let right = self.gate_fusion_pass(*right);
 
-                CircuitNode::BinaryOp {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                match op {
+                    BinaryOperator::Add
+                    | BinaryOperator::Mul
+                    | BinaryOperator::And
+                    | BinaryOperator::Or
+                    | BinaryOperator::Xor => {
+                        // Collect flat operand list by flattening same-op children.
+                        // After these two calls, left/right are consumed into operands.
+                        let mut operands: Vec<CircuitNode> = Vec::new();
+                        Self::collect_nary_operands(op, left, &mut operands);
+                        Self::collect_nary_operands(op, right, &mut operands);
+                        // Invariant: operands.len() >= 2 (each of left/right contributes >= 1)
+
+                        if operands.len() >= 3 {
+                            self.stats.gates_fused += operands.len().saturating_sub(2);
+                            CircuitNode::NaryOp { op, operands }
+                        } else {
+                            // Exactly 2 operands — BinaryOp is the canonical form
+                            Self::build_balanced_reduction(op, operands)
+                        }
+                    }
+                    _ => CircuitNode::BinaryOp {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                }
+            }
+
+            CircuitNode::NaryOp { op, operands } => {
+                // Recurse into operands and potentially absorb more
+                let new_operands: Vec<CircuitNode> = operands
+                    .into_iter()
+                    .map(|o| self.gate_fusion_pass(o))
+                    .collect();
+                // Re-flatten after recursion
+                let mut flat_operands = Vec::new();
+                for operand in new_operands {
+                    Self::collect_nary_operands(op, operand, &mut flat_operands);
+                }
+                if flat_operands.len() >= 2 {
+                    CircuitNode::NaryOp {
+                        op,
+                        operands: flat_operands,
+                    }
+                } else if flat_operands.len() == 1 {
+                    flat_operands.remove(0)
+                } else {
+                    CircuitNode::NaryOp {
+                        op,
+                        operands: flat_operands,
+                    }
                 }
             }
 
@@ -576,7 +700,7 @@ impl CircuitOptimizer {
                     operand: inner,
                 } = operand
                 {
-                    self.stats.gates_fused += 2; // Removed 2 NOT gates
+                    self.stats.gates_fused += 2;
                     return *inner;
                 }
 
@@ -597,7 +721,6 @@ impl CircuitOptimizer {
             CircuitNode::Compare { op, left, right } => {
                 let left = self.gate_fusion_pass(*left);
                 let right = self.gate_fusion_pass(*right);
-
                 CircuitNode::Compare {
                     op,
                     left: Box::new(left),
@@ -609,6 +732,29 @@ impl CircuitOptimizer {
         }
     }
 
+    /// Helper to collect operands for N-ary fusion by flattening same-op chains
+    fn collect_nary_operands(op: BinaryOperator, node: CircuitNode, out: &mut Vec<CircuitNode>) {
+        match node {
+            CircuitNode::BinaryOp {
+                op: child_op,
+                left,
+                right,
+            } if child_op == op => {
+                Self::collect_nary_operands(op, *left, out);
+                Self::collect_nary_operands(op, *right, out);
+            }
+            CircuitNode::NaryOp {
+                op: child_op,
+                operands,
+            } if child_op == op => {
+                for operand in operands {
+                    Self::collect_nary_operands(op, operand, out);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+
     /// Bootstrap minimization pass
     ///
     /// Analyzes the circuit to minimize expensive bootstrap operations by:
@@ -616,23 +762,75 @@ impl CircuitOptimizer {
     /// - Combining operations that share bootstrap requirements
     /// - Eliminating redundant bootstraps
     fn bootstrap_minimization_pass(&mut self, node: CircuitNode) -> Result<CircuitNode> {
-        // For now, we apply a simple optimization: reorder additions before multiplications
-        // This allows us to batch cheap operations before expensive ones
         Ok(self.reorder_for_bootstrap_efficiency(node))
     }
 
     /// Reorder operations to minimize bootstraps
-    #[allow(clippy::only_used_in_recursion)]
-    fn reorder_for_bootstrap_efficiency(&self, node: CircuitNode) -> CircuitNode {
+    ///
+    /// For commutative operators, places the higher-bootstrap-cost subtree
+    /// first (left), which improves scheduling locality. For NaryOp Mul
+    /// (bootstrap-heavy), builds a balanced binary reduction tree.
+    fn reorder_for_bootstrap_efficiency(&mut self, node: CircuitNode) -> CircuitNode {
         match node {
             CircuitNode::BinaryOp { op, left, right } => {
                 let left = self.reorder_for_bootstrap_efficiency(*left);
                 let right = self.reorder_for_bootstrap_efficiency(*right);
 
+                let is_commutative = matches!(
+                    op,
+                    BinaryOperator::Add
+                        | BinaryOperator::Mul
+                        | BinaryOperator::And
+                        | BinaryOperator::Or
+                        | BinaryOperator::Xor
+                );
+
+                if is_commutative {
+                    let left_cost = self.count_bootstraps(&left);
+                    let right_cost = self.count_bootstraps(&right);
+                    if right_cost > left_cost {
+                        return CircuitNode::BinaryOp {
+                            op,
+                            left: Box::new(right),
+                            right: Box::new(left),
+                        };
+                    }
+                }
+
                 CircuitNode::BinaryOp {
                     op,
                     left: Box::new(left),
                     right: Box::new(right),
+                }
+            }
+
+            CircuitNode::NaryOp { op, operands } => {
+                // Recurse into operands
+                let processed_operands: Vec<CircuitNode> = operands
+                    .into_iter()
+                    .map(|o| self.reorder_for_bootstrap_efficiency(o))
+                    .collect();
+
+                // For Mul (bootstrap-heavy), build balanced binary reduction tree
+                if matches!(op, BinaryOperator::Mul) && processed_operands.len() >= 2 {
+                    return Self::build_balanced_reduction(op, processed_operands);
+                }
+
+                // For Add and logical ops (no bootstrap cost), sort by cost descending
+                let mut with_costs: Vec<(usize, CircuitNode)> = processed_operands
+                    .into_iter()
+                    .map(|o| {
+                        let cost = self.count_bootstraps(&o);
+                        (cost, o)
+                    })
+                    .collect();
+                with_costs.sort_by_key(|b| std::cmp::Reverse(b.0));
+                let sorted_operands: Vec<CircuitNode> =
+                    with_costs.into_iter().map(|(_, o)| o).collect();
+
+                CircuitNode::NaryOp {
+                    op,
+                    operands: sorted_operands,
                 }
             }
 
@@ -647,7 +845,6 @@ impl CircuitOptimizer {
             CircuitNode::Compare { op, left, right } => {
                 let left = self.reorder_for_bootstrap_efficiency(*left);
                 let right = self.reorder_for_bootstrap_efficiency(*right);
-
                 CircuitNode::Compare {
                     op,
                     left: Box::new(left),
@@ -656,6 +853,57 @@ impl CircuitOptimizer {
             }
 
             other => other,
+        }
+    }
+
+    /// Build a balanced binary reduction tree for N operands
+    fn build_balanced_reduction(op: BinaryOperator, operands: Vec<CircuitNode>) -> CircuitNode {
+        if operands.is_empty() {
+            // Degenerate case: return a zero-value placeholder
+            return CircuitNode::Constant(crate::compute::circuit::CircuitValue::U8(0));
+        }
+        if operands.len() == 1 {
+            // unwrap is safe here: len == 1, so next() always returns Some
+            return operands.into_iter().next().unwrap_or(CircuitNode::Constant(
+                crate::compute::circuit::CircuitValue::U8(0),
+            ));
+        }
+        if operands.len() == 2 {
+            let mut it = operands.into_iter();
+            // Both next() calls succeed because len == 2
+            let left = it.next().unwrap_or(CircuitNode::Constant(
+                crate::compute::circuit::CircuitValue::U8(0),
+            ));
+            let right = it.next().unwrap_or(CircuitNode::Constant(
+                crate::compute::circuit::CircuitValue::U8(0),
+            ));
+            return CircuitNode::BinaryOp {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+
+        let mid = operands.len() / 2;
+        let (left_operands, right_operands) = operands.into_iter().enumerate().fold(
+            (Vec::new(), Vec::new()),
+            |(mut l, mut r), (i, node)| {
+                if i < mid {
+                    l.push(node);
+                } else {
+                    r.push(node);
+                }
+                (l, r)
+            },
+        );
+
+        let left_node = Self::build_balanced_reduction(op, left_operands);
+        let right_node = Self::build_balanced_reduction(op, right_operands);
+
+        CircuitNode::BinaryOp {
+            op,
+            left: Box::new(left_node),
+            right: Box::new(right_node),
         }
     }
 
@@ -901,6 +1149,15 @@ impl CircuitOptimizer {
                 }
             }
 
+            CircuitNode::NaryOp { op, operands } => {
+                let new_operands: Vec<CircuitNode> =
+                    operands.into_iter().map(|o| self.dce_simplify(o)).collect();
+                CircuitNode::NaryOp {
+                    op,
+                    operands: new_operands,
+                }
+            }
+
             other => other,
         }
     }
@@ -988,6 +1245,11 @@ impl CircuitOptimizer {
                 self.mark_live_nodes(left, live_nodes);
                 self.mark_live_nodes(right, live_nodes);
             }
+            CircuitNode::NaryOp { operands, .. } => {
+                for operand in operands {
+                    self.mark_live_nodes(operand, live_nodes);
+                }
+            }
         }
     }
 
@@ -997,33 +1259,48 @@ impl CircuitOptimizer {
     fn analyze_parallelism(&self, circuit: &Circuit) -> Result<DependencyGraph> {
         let mut graph = DependencyGraph::new();
         let mut node_id_map = HashMap::new();
+        let mut cse_map = HashMap::new();
         let mut next_id = 0;
 
-        // Build dependency graph
-        self.build_dependency_graph(&circuit.root, &mut graph, &mut node_id_map, &mut next_id);
+        // Build dependency graph with CSE deduplication
+        self.build_dependency_graph(
+            &circuit.root,
+            &mut graph,
+            &mut node_id_map,
+            &mut cse_map,
+            &mut next_id,
+        );
 
         graph.node_count = next_id;
 
         // Identify parallel groups using level-wise traversal
         graph.parallel_groups = self.identify_parallel_groups(&graph);
 
-        // Find critical path
+        // Find critical path using memoized algorithm
         graph.critical_path = self.find_critical_path(&graph);
 
         Ok(graph)
     }
 
-    /// Build dependency graph recursively
+    /// Build dependency graph recursively, using CSE map to deduplicate identical subtrees
     #[allow(clippy::only_used_in_recursion)]
     fn build_dependency_graph(
         &self,
         node: &CircuitNode,
         graph: &mut DependencyGraph,
         node_id_map: &mut HashMap<String, NodeId>,
+        cse_map: &mut HashMap<u64, NodeId>,
         next_id: &mut usize,
     ) -> NodeId {
+        // Check for structural CSE deduplication
+        let node_hash = Self::structural_hash(node);
+        if let Some(&existing_id) = cse_map.get(&node_hash) {
+            return existing_id;
+        }
+
         let current_id = NodeId(*next_id);
         *next_id += 1;
+        cse_map.insert(node_hash, current_id);
 
         match node {
             CircuitNode::Load(name) => {
@@ -1038,9 +1315,10 @@ impl CircuitOptimizer {
             }
 
             CircuitNode::BinaryOp { left, right, .. } => {
-                let left_id = self.build_dependency_graph(left, graph, node_id_map, next_id);
-                let right_id = self.build_dependency_graph(right, graph, node_id_map, next_id);
-
+                let left_id =
+                    self.build_dependency_graph(left, graph, node_id_map, cse_map, next_id);
+                let right_id =
+                    self.build_dependency_graph(right, graph, node_id_map, cse_map, next_id);
                 graph
                     .dependencies
                     .insert(current_id, vec![left_id, right_id]);
@@ -1048,21 +1326,136 @@ impl CircuitOptimizer {
             }
 
             CircuitNode::UnaryOp { operand, .. } => {
-                let operand_id = self.build_dependency_graph(operand, graph, node_id_map, next_id);
-
+                let operand_id =
+                    self.build_dependency_graph(operand, graph, node_id_map, cse_map, next_id);
                 graph.dependencies.insert(current_id, vec![operand_id]);
                 current_id
             }
 
             CircuitNode::Compare { left, right, .. } => {
-                let left_id = self.build_dependency_graph(left, graph, node_id_map, next_id);
-                let right_id = self.build_dependency_graph(right, graph, node_id_map, next_id);
-
+                let left_id =
+                    self.build_dependency_graph(left, graph, node_id_map, cse_map, next_id);
+                let right_id =
+                    self.build_dependency_graph(right, graph, node_id_map, cse_map, next_id);
                 graph
                     .dependencies
                     .insert(current_id, vec![left_id, right_id]);
                 current_id
             }
+
+            CircuitNode::NaryOp { operands, .. } => {
+                let dep_ids: Vec<NodeId> = operands
+                    .iter()
+                    .map(|o| self.build_dependency_graph(o, graph, node_id_map, cse_map, next_id))
+                    .collect();
+                graph.dependencies.insert(current_id, dep_ids);
+                current_id
+            }
+        }
+    }
+
+    /// Compute a structural hash for a circuit node (for CSE deduplication)
+    fn structural_hash(node: &CircuitNode) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
+        let mut hasher = DefaultHasher::new();
+        Self::hash_node(node, &mut hasher);
+        hasher.finish()
+    }
+
+    fn hash_node(node: &CircuitNode, hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        match node {
+            CircuitNode::Load(name) => {
+                0u8.hash(hasher);
+                name.hash(hasher);
+            }
+            CircuitNode::Constant(value) => {
+                1u8.hash(hasher);
+                match value {
+                    crate::compute::circuit::CircuitValue::Bool(v) => {
+                        0u8.hash(hasher);
+                        v.hash(hasher);
+                    }
+                    crate::compute::circuit::CircuitValue::U8(v) => {
+                        1u8.hash(hasher);
+                        v.hash(hasher);
+                    }
+                    crate::compute::circuit::CircuitValue::U16(v) => {
+                        2u8.hash(hasher);
+                        v.hash(hasher);
+                    }
+                    crate::compute::circuit::CircuitValue::U32(v) => {
+                        3u8.hash(hasher);
+                        v.hash(hasher);
+                    }
+                    crate::compute::circuit::CircuitValue::U64(v) => {
+                        4u8.hash(hasher);
+                        v.hash(hasher);
+                    }
+                }
+            }
+            CircuitNode::EncryptedConstant {
+                data,
+                original_type,
+            } => {
+                2u8.hash(hasher);
+                data.hash(hasher);
+                match original_type {
+                    crate::compute::circuit::ConstantType::Integer => 0u8.hash(hasher),
+                    crate::compute::circuit::ConstantType::Boolean => 1u8.hash(hasher),
+                    crate::compute::circuit::ConstantType::Float => 2u8.hash(hasher),
+                    crate::compute::circuit::ConstantType::Bytes => 3u8.hash(hasher),
+                }
+            }
+            CircuitNode::BinaryOp { op, left, right } => {
+                3u8.hash(hasher);
+                Self::hash_binary_op(*op, hasher);
+                Self::hash_node(left, hasher);
+                Self::hash_node(right, hasher);
+            }
+            CircuitNode::UnaryOp { op, operand } => {
+                4u8.hash(hasher);
+                match op {
+                    UnaryOperator::Not => 0u8.hash(hasher),
+                    UnaryOperator::Neg => 1u8.hash(hasher),
+                }
+                Self::hash_node(operand, hasher);
+            }
+            CircuitNode::Compare { op, left, right } => {
+                5u8.hash(hasher);
+                match op {
+                    CompareOperator::Eq => 0u8.hash(hasher),
+                    CompareOperator::Ne => 1u8.hash(hasher),
+                    CompareOperator::Lt => 2u8.hash(hasher),
+                    CompareOperator::Le => 3u8.hash(hasher),
+                    CompareOperator::Gt => 4u8.hash(hasher),
+                    CompareOperator::Ge => 5u8.hash(hasher),
+                }
+                Self::hash_node(left, hasher);
+                Self::hash_node(right, hasher);
+            }
+            CircuitNode::NaryOp { op, operands } => {
+                6u8.hash(hasher);
+                Self::hash_binary_op(*op, hasher);
+                operands.len().hash(hasher);
+                for o in operands {
+                    Self::hash_node(o, hasher);
+                }
+            }
+        }
+    }
+
+    fn hash_binary_op(op: BinaryOperator, hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        match op {
+            BinaryOperator::Add => 0u8.hash(hasher),
+            BinaryOperator::Sub => 1u8.hash(hasher),
+            BinaryOperator::Mul => 2u8.hash(hasher),
+            BinaryOperator::And => 3u8.hash(hasher),
+            BinaryOperator::Or => 4u8.hash(hasher),
+            BinaryOperator::Xor => 5u8.hash(hasher),
         }
     }
 
@@ -1120,45 +1513,82 @@ impl CircuitOptimizer {
         parallel_groups
     }
 
-    /// Find the critical path (longest dependency chain)
+    /// Find the critical path (longest dependency chain) using memoization
     fn find_critical_path(&self, graph: &DependencyGraph) -> Vec<NodeId> {
-        // Simple implementation: find the node with the longest chain to root
-        let mut max_path = Vec::new();
+        let mut memo = HashMap::new();
 
-        for node_id in graph.dependencies.keys() {
-            let path = self.find_path_to_root(*node_id, graph);
-            if path.len() > max_path.len() {
-                max_path = path;
+        // Compute longest path length to each node
+        for &node_id in graph.dependencies.keys() {
+            self.longest_path_to(node_id, graph, &mut memo);
+        }
+
+        // Find the node with the maximum path length
+        let max_node = graph
+            .dependencies
+            .keys()
+            .max_by_key(|&&id| memo.get(&id).copied().unwrap_or(0));
+
+        let Some(&end_node) = max_node else {
+            return Vec::new();
+        };
+
+        // Reconstruct path from end_node following max-cost dependencies
+        let mut path = Vec::new();
+        let mut current = end_node;
+        path.push(current);
+
+        loop {
+            let deps = match graph.dependencies.get(&current) {
+                Some(d) if !d.is_empty() => d,
+                _ => break,
+            };
+            let next = deps
+                .iter()
+                .max_by_key(|&&dep_id| memo.get(&dep_id).copied().unwrap_or(0))
+                .copied();
+            match next {
+                Some(next_id) if next_id != current => {
+                    path.push(next_id);
+                    current = next_id;
+                }
+                _ => break,
             }
         }
 
-        max_path
+        path.reverse();
+        path
     }
 
-    /// Find path from a node to a root (node with no dependencies)
-    #[allow(clippy::only_used_in_recursion)]
-    fn find_path_to_root(&self, node_id: NodeId, graph: &DependencyGraph) -> Vec<NodeId> {
+    /// Memoized computation of longest path from a leaf to `node_id`
+    fn longest_path_to(
+        &self,
+        node_id: NodeId,
+        graph: &DependencyGraph,
+        memo: &mut HashMap<NodeId, usize>,
+    ) -> usize {
+        if let Some(&cached) = memo.get(&node_id) {
+            return cached;
+        }
+
         let deps = graph
             .dependencies
             .get(&node_id)
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
 
-        if deps.is_empty() {
-            return vec![node_id];
-        }
+        let result = if deps.is_empty() {
+            1
+        } else {
+            let max_dep = deps
+                .iter()
+                .map(|&dep_id| self.longest_path_to(dep_id, graph, memo))
+                .max()
+                .unwrap_or(0);
+            max_dep + 1
+        };
 
-        // Find the longest path through dependencies
-        let mut longest_path = Vec::new();
-        for dep_id in deps {
-            let dep_path = self.find_path_to_root(*dep_id, graph);
-            if dep_path.len() > longest_path.len() {
-                longest_path = dep_path;
-            }
-        }
-
-        longest_path.push(node_id);
-        longest_path
+        memo.insert(node_id, result);
+        result
     }
 }
 
@@ -1169,809 +1599,5 @@ impl Default for CircuitOptimizer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::compute::circuit::CircuitBuilder;
-
-    // ── Constant folding tests ─────────────────────────────────────────
-
-    #[test]
-    fn test_constant_folding() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        // Create circuit: 5 + 3
-        let a = builder.constant(CircuitValue::U8(5));
-        let b = builder.constant(CircuitValue::U8(3));
-        let sum = builder.add(a, b);
-
-        let circuit = Circuit::new(sum, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        // Should fold to constant 8
-        assert!(matches!(
-            optimized.root,
-            CircuitNode::Constant(CircuitValue::U8(8))
-        ));
-        assert!(optimizer.stats().constants_folded >= 1);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_constant_folding_sub() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        let a = builder.constant(CircuitValue::U16(100));
-        let b = builder.constant(CircuitValue::U16(30));
-        let result = builder.sub(a, b);
-
-        let circuit = Circuit::new(result, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Constant(CircuitValue::U16(70)));
-        Ok(())
-    }
-
-    #[test]
-    fn test_constant_folding_mul() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        let a = builder.constant(CircuitValue::U32(7));
-        let b = builder.constant(CircuitValue::U32(6));
-        let result = builder.mul(a, b);
-
-        let circuit = Circuit::new(result, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Constant(CircuitValue::U32(42)));
-        Ok(())
-    }
-
-    #[test]
-    fn test_constant_folding_bool_and() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        let t = builder.constant(CircuitValue::Bool(true));
-        let f = builder.constant(CircuitValue::Bool(false));
-        let result = builder.and(t, f);
-
-        let circuit = Circuit::new(result, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(
-            optimized.root,
-            CircuitNode::Constant(CircuitValue::Bool(false))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_constant_folding_unary_not() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        let t = builder.constant(CircuitValue::Bool(true));
-        let result = builder.not(t);
-
-        let circuit = Circuit::new(result, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(
-            optimized.root,
-            CircuitNode::Constant(CircuitValue::Bool(false))
-        );
-        Ok(())
-    }
-
-    // ── Algebraic identity tests ───────────────────────────────────────
-
-    #[test]
-    fn test_algebraic_x_plus_zero() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        let x = builder.load("x");
-        let zero = builder.constant(CircuitValue::U8(0));
-        let add_zero = builder.add(x, zero);
-
-        let circuit = Circuit::new(add_zero, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_algebraic_zero_plus_x() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        let x = builder.load("x");
-        let zero = builder.constant(CircuitValue::U8(0));
-        let result = builder.add(zero, x);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_algebraic_x_mul_one() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        let x = builder.load("x");
-        let one = builder.constant(CircuitValue::U8(1));
-        let result = builder.mul(x, one);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_algebraic_one_mul_x() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        let x = builder.load("x");
-        let one = builder.constant(CircuitValue::U8(1));
-        let result = builder.mul(one, x);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_algebraic_x_mul_zero() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        let x = builder.load("x");
-        let zero = builder.constant(CircuitValue::U8(0));
-        let result = builder.mul(x, zero);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Constant(CircuitValue::U8(0)));
-        Ok(())
-    }
-
-    #[test]
-    fn test_algebraic_zero_mul_x() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        let x = builder.load("x");
-        let zero = builder.constant(CircuitValue::U8(0));
-        let result = builder.mul(zero, x);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Constant(CircuitValue::U8(0)));
-        Ok(())
-    }
-
-    #[test]
-    fn test_algebraic_x_sub_zero() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        let x = builder.load("x");
-        let zero = builder.constant(CircuitValue::U8(0));
-        let result = builder.sub(x, zero);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_algebraic_x_sub_x() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        let x1 = builder.load("x");
-        let x2 = builder.load("x");
-        let result = builder.sub(x1, x2);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        // x - x should be 0
-        assert_eq!(optimized.root, CircuitNode::Constant(CircuitValue::U8(0)));
-        assert!(optimizer.stats().algebraic_simplifications >= 1);
-        Ok(())
-    }
-
-    // ── Double negation tests ──────────────────────────────────────────
-
-    #[test]
-    fn test_double_negation_elimination() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::Bool);
-
-        let x = builder.load("x");
-        let not_x = builder.not(x);
-        let not_not_x = builder.not(not_x);
-
-        let circuit = Circuit::new(not_not_x, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_quadruple_negation_elimination() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::Bool);
-
-        let x = builder.load("x");
-        let n1 = builder.not(x);
-        let n2 = builder.not(n1);
-        let n3 = builder.not(n2);
-        let n4 = builder.not(n3);
-
-        let circuit = Circuit::new(n4, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    // ── Nested simplification tests ────────────────────────────────────
-
-    #[test]
-    fn test_nested_x_plus_0_times_1() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        // (x + 0) * 1 -> x
-        let x = builder.load("x");
-        let zero = builder.constant(CircuitValue::U8(0));
-        let one = builder.constant(CircuitValue::U8(1));
-        let add_zero = builder.add(x, zero);
-        let times_one = builder.mul(add_zero, one);
-
-        let circuit = Circuit::new(times_one, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_nested_complex_optimization() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder
-            .declare_variable("a", EncryptedType::U8)
-            .declare_variable("b", EncryptedType::U8);
-
-        // (a * 1) + (b * 0) + 5  ->  a + 5
-        let a = builder.load("a");
-        let b = builder.load("b");
-        let one = builder.constant(CircuitValue::U8(1));
-        let zero = builder.constant(CircuitValue::U8(0));
-        let five = builder.constant(CircuitValue::U8(5));
-
-        let a_times_1 = builder.mul(a, one);
-        let b_times_0 = builder.mul(b, zero);
-        let sum1 = builder.add(a_times_1, b_times_0);
-        let result = builder.add(sum1, five);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let original_gates = circuit.gate_count;
-
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert!(optimized.gate_count < original_gates);
-        assert!(optimizer.stats().gate_reduction_percent() >= 30.0);
-
-        Ok(())
-    }
-
-    // ── No-op on already optimal circuits ──────────────────────────────
-
-    #[test]
-    fn test_noop_on_optimal_circuit() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder
-            .declare_variable("a", EncryptedType::U8)
-            .declare_variable("b", EncryptedType::U8);
-
-        // a + b is already optimal
-        let a = builder.load("a");
-        let b = builder.load("b");
-        let result = builder.add(a, b);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let original_gates = circuit.gate_count;
-
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.gate_count, original_gates);
-        assert_eq!(
-            optimized.root,
-            CircuitNode::BinaryOp {
-                op: BinaryOperator::Add,
-                left: Box::new(CircuitNode::Load("a".to_string())),
-                right: Box::new(CircuitNode::Load("b".to_string())),
-            }
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_noop_single_load() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        let x = builder.load("x");
-        let circuit = Circuit::new(x, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    // ── Statistics accuracy tests ──────────────────────────────────────
-
-    #[test]
-    fn test_stats_accuracy_constant_folding() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        // 5 + 3 -> 8, then 8 * 2 -> 16  (two folds)
-        let a = builder.constant(CircuitValue::U8(5));
-        let b = builder.constant(CircuitValue::U8(3));
-        let two = builder.constant(CircuitValue::U8(2));
-        let sum = builder.add(a, b);
-        let result = builder.mul(sum, two);
-
-        let circuit = Circuit::new(result, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Constant(CircuitValue::U8(16)));
-        // At least 2 constant folds happened (possibly more from DCE re-fold)
-        assert!(optimizer.stats().constants_folded >= 2);
-        Ok(())
-    }
-
-    #[test]
-    fn test_stats_accuracy_algebraic() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        // x - x -> 0
-        let x1 = builder.load("x");
-        let x2 = builder.load("x");
-        let result = builder.sub(x1, x2);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let _optimized = optimizer.optimize(circuit)?;
-
-        let (total_eliminated, total_algebraic, _total_folds) = optimizer.total_stats();
-        assert!(total_eliminated >= 1);
-        assert!(total_algebraic >= 1);
-        Ok(())
-    }
-
-    #[test]
-    fn test_optimization_stats() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        let a = builder.constant(CircuitValue::U8(5));
-        let b = builder.constant(CircuitValue::U8(3));
-        let zero = builder.constant(CircuitValue::U8(0));
-
-        let sum = builder.add(a, b);
-        let add_zero = builder.add(sum, zero);
-
-        let circuit = Circuit::new(add_zero, HashMap::new())?;
-        let original_gates = circuit.gate_count;
-
-        let optimized = optimizer.optimize(circuit)?;
-        let optimized_gates = optimized.gate_count;
-
-        assert!(optimized_gates < original_gates);
-        assert!(optimizer.stats().gate_reduction_percent() > 0.0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_total_stats_method() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        // (x + 0) * 1 -> x (algebraic simplifications)
-        // plus: 5 + 3 constant fold somewhere
-        let x = builder.load("x");
-        let zero = builder.constant(CircuitValue::U8(0));
-        let one = builder.constant(CircuitValue::U8(1));
-        let add_zero = builder.add(x, zero);
-        let times_one = builder.mul(add_zero, one);
-
-        let circuit = Circuit::new(times_one, builder.variable_types_clone())?;
-        let _optimized = optimizer.optimize(circuit)?;
-
-        let (eliminated, algebraic, _folds) = optimizer.total_stats();
-        // Both x+0 and *1 should be simplified
-        assert!(eliminated + algebraic >= 2);
-        Ok(())
-    }
-
-    // ── Bootstrap counting test ────────────────────────────────────────
-
-    #[test]
-    fn test_bootstrap_counting() -> Result<()> {
-        let optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder
-            .declare_variable("a", EncryptedType::U8)
-            .declare_variable("b", EncryptedType::U8);
-
-        let a = builder.load("a");
-        let b = builder.load("b");
-        let mul = builder.mul(a, b);
-
-        let circuit = Circuit::new(mul, builder.variable_types_clone())?;
-        let bootstrap_count = optimizer.count_bootstraps(&circuit.root);
-
-        assert_eq!(bootstrap_count, 1);
-        Ok(())
-    }
-
-    // ── Parallelization analysis test ──────────────────────────────────
-
-    #[test]
-    fn test_parallelization_analysis() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder
-            .declare_variable("a", EncryptedType::U8)
-            .declare_variable("b", EncryptedType::U8)
-            .declare_variable("c", EncryptedType::U8);
-
-        let a = builder.load("a");
-        let b = builder.load("b");
-        let c = builder.load("c");
-        let sum1 = builder.add(a, b);
-        let sum2 = builder.add(sum1, c);
-
-        let circuit = Circuit::new(sum2, builder.variable_types_clone())?;
-        let _optimized = optimizer.optimize(circuit)?;
-
-        let graph = optimizer.dependency_graph();
-        assert!(graph.node_count > 0);
-        assert!(!graph.parallel_groups.is_empty());
-
-        Ok(())
-    }
-
-    // ── Live variable collection test ──────────────────────────────────
-
-    #[test]
-    fn test_collect_live_variables() -> Result<()> {
-        let optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder
-            .declare_variable("a", EncryptedType::U8)
-            .declare_variable("b", EncryptedType::U8);
-
-        let a = builder.load("a");
-        let b = builder.load("b");
-        let result = builder.add(a, b);
-
-        let live = optimizer.collect_live_variables(&result);
-        assert!(live.contains("a"));
-        assert!(live.contains("b"));
-        assert_eq!(live.len(), 2);
-        Ok(())
-    }
-
-    #[test]
-    fn test_collect_live_variables_after_dce() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder
-            .declare_variable("a", EncryptedType::U8)
-            .declare_variable("b", EncryptedType::U8);
-
-        // (a * 1) + (b * 0) => a + 0 => a
-        // After optimization, b should be eliminated
-        let a = builder.load("a");
-        let b = builder.load("b");
-        let one = builder.constant(CircuitValue::U8(1));
-        let zero = builder.constant(CircuitValue::U8(0));
-        let a1 = builder.mul(a, one);
-        let b0 = builder.mul(b, zero);
-        let result = builder.add(a1, b0);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        let live = optimizer.collect_live_variables(&optimized.root);
-        assert!(live.contains("a"));
-        // b was multiplied by 0, so entire branch collapses to 0, and then a + 0 => a
-        assert!(!live.contains("b"), "b should be eliminated by DCE");
-        Ok(())
-    }
-
-    // ── Comparison constant folding test ───────────────────────────────
-
-    #[test]
-    fn test_comparison_constant_fold() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        let a = builder.constant(CircuitValue::U8(10));
-        let b = builder.constant(CircuitValue::U8(5));
-        let result = builder.gt(a, b);
-
-        let circuit = Circuit::new(result, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(
-            optimized.root,
-            CircuitNode::Constant(CircuitValue::Bool(true))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_comparison_constant_fold_eq() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        let a = builder.constant(CircuitValue::U8(5));
-        let b = builder.constant(CircuitValue::U8(5));
-        let result = builder.eq(a, b);
-
-        let circuit = Circuit::new(result, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(
-            optimized.root,
-            CircuitNode::Constant(CircuitValue::Bool(true))
-        );
-        Ok(())
-    }
-
-    // ── XOR self-elimination test ──────────────────────────────────────
-
-    #[test]
-    fn test_xor_self_elimination() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::Bool);
-
-        let x1 = builder.load("x");
-        let x2 = builder.load("x");
-        let result = builder.xor(x1, x2);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(
-            optimized.root,
-            CircuitNode::Constant(CircuitValue::Bool(false))
-        );
-        Ok(())
-    }
-
-    // ── AND/OR idempotent test ─────────────────────────────────────────
-
-    #[test]
-    fn test_and_idempotent() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::Bool);
-
-        let x1 = builder.load("x");
-        let x2 = builder.load("x");
-        let result = builder.and(x1, x2);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_or_idempotent() -> Result<()> {
-        let mut optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::Bool);
-
-        let x1 = builder.load("x");
-        let x2 = builder.load("x");
-        let result = builder.or(x1, x2);
-
-        let circuit = Circuit::new(result, builder.variable_types_clone())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        assert_eq!(optimized.root, CircuitNode::Load("x".to_string()));
-        Ok(())
-    }
-
-    // ── Encrypted constant optimizer tests ────────────────────────────
-
-    #[test]
-    fn test_optimizer_does_not_fold_encrypted_constants() -> Result<()> {
-        use crate::compute::circuit::ConstantType;
-
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        // Build: EncryptedConstant + EncryptedConstant
-        // The optimizer must NOT try to constant-fold these because their
-        // plaintext values are unknown.
-        let enc_a = builder.encrypted_constant(vec![0x01, 0x05], ConstantType::Integer);
-        let enc_b = builder.encrypted_constant(vec![0x01, 0x03], ConstantType::Integer);
-        let sum = builder.add(enc_a.clone(), enc_b.clone());
-
-        let circuit = Circuit::new(sum, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        // The root should still be a BinaryOp Add, not a folded constant
-        match &optimized.root {
-            CircuitNode::BinaryOp { op, left, right } => {
-                assert_eq!(*op, BinaryOperator::Add);
-                assert!(matches!(**left, CircuitNode::EncryptedConstant { .. }));
-                assert!(matches!(**right, CircuitNode::EncryptedConstant { .. }));
-            }
-            _ => {
-                return Err(AmateRSError::FheComputation(ErrorContext::new(
-                    "Optimizer incorrectly folded encrypted constants".to_string(),
-                )));
-            }
-        }
-
-        // No constants should have been folded
-        assert_eq!(optimizer.stats().constants_folded, 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_optimizer_dce_treats_encrypted_constant_as_opaque() -> Result<()> {
-        use crate::compute::circuit::ConstantType;
-
-        let mut optimizer = CircuitOptimizer::new();
-
-        // Build a circuit: EncryptedConstant (standalone, as root)
-        // DCE should leave it alone (it is the output)
-        let enc = CircuitNode::EncryptedConstant {
-            data: vec![0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11],
-            original_type: ConstantType::Integer,
-        };
-
-        let circuit = Circuit::new(enc.clone(), HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        // The root should remain an EncryptedConstant, untouched
-        assert_eq!(optimized.root, enc);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_optimizer_mixed_plain_and_encrypted_constants() -> Result<()> {
-        use crate::compute::circuit::ConstantType;
-
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        // Build: Constant(5u8) + Constant(3u8) -- these CAN be folded
-        let plain_a = builder.constant(CircuitValue::U8(5));
-        let plain_b = builder.constant(CircuitValue::U8(3));
-        let plain_sum = builder.add(plain_a, plain_b);
-
-        let circuit = Circuit::new(plain_sum, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        // Should fold to 8
-        assert!(matches!(
-            optimized.root,
-            CircuitNode::Constant(CircuitValue::U8(8))
-        ));
-
-        // Now with encrypted: EncryptedConst + EncryptedConst -- must NOT fold
-        let mut optimizer2 = CircuitOptimizer::new();
-        let enc_a = builder.encrypted_constant(vec![0x01, 0xAA], ConstantType::Integer);
-        let enc_b = builder.encrypted_constant(vec![0x01, 0xBB], ConstantType::Integer);
-        let enc_sum = builder.add(enc_a, enc_b);
-
-        let circuit2 = Circuit::new(enc_sum, HashMap::new())?;
-        let optimized2 = optimizer2.optimize(circuit2)?;
-
-        assert!(matches!(optimized2.root, CircuitNode::BinaryOp { .. }));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_optimizer_algebraic_identity_with_encrypted_constant() -> Result<()> {
-        use crate::compute::circuit::ConstantType;
-
-        let mut optimizer = CircuitOptimizer::new();
-        let builder = CircuitBuilder::new();
-
-        // Build: EncryptedConstant + Constant(0u64)
-        // EncryptedConstant with ConstantType::Integer infers to U64,
-        // so the zero constant must also be U64 for type compatibility.
-        // The algebraic identity x + 0 = x should simplify this to just
-        // the EncryptedConstant.
-        let enc = builder.encrypted_constant(
-            vec![0x04, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-            ConstantType::Integer,
-        );
-        let zero = builder.constant(CircuitValue::U64(0));
-        let sum = builder.add(enc.clone(), zero);
-
-        let circuit = Circuit::new(sum, HashMap::new())?;
-        let optimized = optimizer.optimize(circuit)?;
-
-        // Should simplify to just the encrypted constant
-        assert_eq!(optimized.root, enc);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_optimizer_live_variables_with_encrypted_constants() -> Result<()> {
-        use crate::compute::circuit::ConstantType;
-
-        let optimizer = CircuitOptimizer::new();
-        let mut builder = CircuitBuilder::new();
-        builder.declare_variable("x", EncryptedType::U8);
-
-        // Build: Load("x") + EncryptedConstant
-        let x = builder.load("x");
-        let enc = builder.encrypted_constant(vec![0x01, 0x10], ConstantType::Integer);
-        let sum = builder.add(x, enc);
-
-        let live = optimizer.collect_live_variables(&sum);
-
-        // "x" is live, encrypted constant contributes nothing to variables
-        assert!(live.contains("x"));
-        assert_eq!(live.len(), 1);
-
-        Ok(())
-    }
-}
+#[path = "optimizer_tests.rs"]
+mod tests;

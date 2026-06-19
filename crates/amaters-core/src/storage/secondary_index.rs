@@ -10,10 +10,9 @@
 //! them in sync as data is inserted, updated, or deleted.
 
 use crate::error::{AmateRSError, ErrorContext, Result};
-use crate::types::Key;
+use crate::types::{CipherBlob, Key};
 use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Types & configuration
@@ -65,6 +64,30 @@ pub struct IndexEntry {
     pub indexed_value: Vec<u8>,
     /// The primary key that owns this value.
     pub primary_key: Key,
+}
+
+/// A single extracted (collection, field-name, value) triple for a stored record.
+///
+/// An [`IndexExtractor`] produces these to describe which index slots a record
+/// should occupy.  Because blobs are ciphertext, extractors should derive fields
+/// from the primary key, unencrypted metadata, or — in tests — plaintext payloads,
+/// **not** by parsing the encrypted bytes of the `CipherBlob`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedField {
+    /// Collection name this field belongs to.
+    pub collection: String,
+    /// Index field name (must match an [`IndexConfig`]'s `field_name`).
+    pub field_name: String,
+    /// Raw bytes of the indexed value.
+    pub value: Vec<u8>,
+}
+
+/// Strategy for deriving indexable fields from a stored record.
+///
+/// Implement this trait for any type that knows how to project a `(Key, CipherBlob)`
+/// pair into the set of secondary-index entries it should occupy.
+pub trait IndexExtractor: Send + Sync + std::fmt::Debug + 'static {
+    fn extract(&self, key: &Key, value: &CipherBlob) -> Vec<IndexedField>;
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +467,158 @@ impl IndexManager {
                 if let Some(new_indexed) = field_extractor(&field, new) {
                     index.insert(new_indexed, key.clone())?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check unique constraints for the given fields before a write.
+    ///
+    /// For each field in `new_fields` that maps to a `unique` index, verifies
+    /// that no *other* primary key already holds the same indexed value.
+    /// Returns a `ValidationError` on the first conflict found; `Ok(())` if all
+    /// constraints are satisfied.
+    pub fn check_unique_for_fields(&self, key: &Key, new_fields: &[IndexedField]) -> Result<()> {
+        for field in new_fields {
+            for entry in self.indexes.iter() {
+                let index = entry.value();
+                if index.config.collection != field.collection
+                    || index.config.field_name != field.field_name
+                    || !index.config.unique
+                {
+                    continue;
+                }
+                for existing_key in index.lookup(&field.value) {
+                    if existing_key != key {
+                        return Err(AmateRSError::ValidationError(ErrorContext::new(format!(
+                            "Unique constraint violation on index '{}': \
+                             value already mapped to a different key",
+                            index.config.name,
+                        ))));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply an automated index update from pre-extracted fields.
+    ///
+    /// `old_fields` — fields the record held *before* the write (empty for inserts).
+    /// `new_fields` — fields the record holds *after* the write (empty for deletes).
+    ///
+    /// For each field triple that appears in `old_fields` but not `new_fields` the
+    /// corresponding index entry is removed; for each triple that appears in `new_fields`
+    /// but not `old_fields` it is inserted.  Triples present in both are handled by
+    /// comparing values — if the value changed, the old entry is removed and the new
+    /// one inserted; if unchanged, the entry is left untouched.
+    ///
+    /// Only indexes whose `(collection, field_name)` matches a field triple are touched;
+    /// indexes without a matching extractor output are not modified.
+    pub fn apply_extracted(
+        &self,
+        key: &Key,
+        old_fields: &[IndexedField],
+        new_fields: &[IndexedField],
+    ) -> Result<()> {
+        use std::collections::HashSet;
+
+        // Build lookup sets keyed by (collection, field_name) for O(1) membership.
+        let old_set: HashSet<(&str, &str)> = old_fields
+            .iter()
+            .map(|f| (f.collection.as_str(), f.field_name.as_str()))
+            .collect();
+        let new_set: HashSet<(&str, &str)> = new_fields
+            .iter()
+            .map(|f| (f.collection.as_str(), f.field_name.as_str()))
+            .collect();
+
+        // Fields that appear only in old → remove them.
+        for old_f in old_fields
+            .iter()
+            .filter(|f| !new_set.contains(&(f.collection.as_str(), f.field_name.as_str())))
+        {
+            self.remove_from_matching_indexes(
+                &old_f.collection,
+                &old_f.field_name,
+                &old_f.value,
+                key,
+            )?;
+        }
+
+        // Fields that appear only in new → insert them.
+        for new_f in new_fields
+            .iter()
+            .filter(|f| !old_set.contains(&(f.collection.as_str(), f.field_name.as_str())))
+        {
+            self.insert_into_matching_indexes(
+                &new_f.collection,
+                &new_f.field_name,
+                &new_f.value,
+                key,
+            )?;
+        }
+
+        // Fields that appear in both → if value changed, swap the entries.
+        for new_f in new_fields
+            .iter()
+            .filter(|f| old_set.contains(&(f.collection.as_str(), f.field_name.as_str())))
+        {
+            // There should always be a matching old field here.
+            if let Some(old_f) = old_fields
+                .iter()
+                .find(|f| f.collection == new_f.collection && f.field_name == new_f.field_name)
+            {
+                if old_f.value != new_f.value {
+                    self.remove_from_matching_indexes(
+                        &old_f.collection,
+                        &old_f.field_name,
+                        &old_f.value,
+                        key,
+                    )?;
+                    self.insert_into_matching_indexes(
+                        &new_f.collection,
+                        &new_f.field_name,
+                        &new_f.value,
+                        key,
+                    )?;
+                }
+                // If value is unchanged the entry is already present — no-op.
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove `(indexed_value, key)` from every index matching `(collection, field_name)`.
+    fn remove_from_matching_indexes(
+        &self,
+        collection: &str,
+        field_name: &str,
+        indexed_value: &[u8],
+        key: &Key,
+    ) -> Result<()> {
+        for mut entry in self.indexes.iter_mut() {
+            let index = entry.value_mut();
+            if index.config.collection == collection && index.config.field_name == field_name {
+                index.remove(indexed_value, key)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Insert `(indexed_value, key)` into every index matching `(collection, field_name)`.
+    fn insert_into_matching_indexes(
+        &self,
+        collection: &str,
+        field_name: &str,
+        indexed_value: &[u8],
+        key: &Key,
+    ) -> Result<()> {
+        for mut entry in self.indexes.iter_mut() {
+            let index = entry.value_mut();
+            if index.config.collection == collection && index.config.field_name == field_name {
+                index.insert(indexed_value.to_vec(), key.clone())?;
             }
         }
         Ok(())
@@ -896,6 +1071,106 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert_eq!(index.lookup(b"val").len(), 1);
 
+        Ok(())
+    }
+
+    // -- apply_extracted tests ------------------------------------------------
+
+    fn make_field(collection: &str, field_name: &str, value: &[u8]) -> IndexedField {
+        IndexedField {
+            collection: collection.to_string(),
+            field_name: field_name.to_string(),
+            value: value.to_vec(),
+        }
+    }
+
+    fn manager_with_btree_index(name: &str, collection: &str, field: &str) -> IndexManager {
+        let mgr = IndexManager::new();
+        mgr.create_index(IndexConfig {
+            name: name.to_string(),
+            collection: collection.to_string(),
+            field_name: field.to_string(),
+            index_type: IndexType::BTree,
+            unique: false,
+        })
+        .expect("create_index");
+        mgr
+    }
+
+    #[test]
+    fn test_apply_extracted_insert_produces_entry() -> Result<()> {
+        let mgr = manager_with_btree_index("idx_col_data", "col", "data");
+        let pk = Key::from_str("rec_1");
+
+        let new_fields = vec![make_field("col", "data", b"alice")];
+        mgr.apply_extracted(&pk, &[], &new_fields)?;
+
+        let count = mgr
+            .with_index("idx_col_data", |idx| idx.lookup(b"alice").len())
+            .unwrap_or(0);
+        assert_eq!(count, 1, "insert should produce exactly one entry");
+        Ok(())
+    }
+
+    #[test]
+    fn test_apply_extracted_update_moves_entry() -> Result<()> {
+        let mgr = manager_with_btree_index("idx_col_data", "col", "data");
+        let pk = Key::from_str("rec_1");
+
+        // Initial insert
+        let fields_v1 = vec![make_field("col", "data", b"alice")];
+        mgr.apply_extracted(&pk, &[], &fields_v1)?;
+
+        // Update to "bob"
+        let fields_v2 = vec![make_field("col", "data", b"bob")];
+        mgr.apply_extracted(&pk, &fields_v1, &fields_v2)?;
+
+        let alice_count = mgr
+            .with_index("idx_col_data", |idx| idx.lookup(b"alice").len())
+            .unwrap_or(0);
+        let bob_count = mgr
+            .with_index("idx_col_data", |idx| idx.lookup(b"bob").len())
+            .unwrap_or(0);
+
+        assert_eq!(alice_count, 0, "old entry should be gone after update");
+        assert_eq!(bob_count, 1, "new entry should be present after update");
+        Ok(())
+    }
+
+    #[test]
+    fn test_apply_extracted_delete_removes_entry() -> Result<()> {
+        let mgr = manager_with_btree_index("idx_col_data", "col", "data");
+        let pk = Key::from_str("rec_1");
+
+        // Insert first
+        let fields = vec![make_field("col", "data", b"alice")];
+        mgr.apply_extracted(&pk, &[], &fields)?;
+
+        // Delete (new_fields is empty)
+        mgr.apply_extracted(&pk, &fields, &[])?;
+
+        let count = mgr
+            .with_index("idx_col_data", |idx| idx.lookup(b"alice").len())
+            .unwrap_or(0);
+        assert_eq!(count, 0, "entry should be gone after delete");
+        Ok(())
+    }
+
+    #[test]
+    fn test_apply_extracted_unchanged_value_is_noop() -> Result<()> {
+        let mgr = manager_with_btree_index("idx_col_data", "col", "data");
+        let pk = Key::from_str("rec_1");
+
+        let fields = vec![make_field("col", "data", b"constant")];
+        // Insert
+        mgr.apply_extracted(&pk, &[], &fields)?;
+        // "Update" with the same value should leave one entry, not duplicate
+        mgr.apply_extracted(&pk, &fields, &fields)?;
+
+        let count = mgr
+            .with_index("idx_col_data", |idx| idx.lookup(b"constant").len())
+            .unwrap_or(0);
+        assert_eq!(count, 1, "idempotent update should not duplicate the entry");
         Ok(())
     }
 }

@@ -5,8 +5,10 @@
 
 use crate::config::{NetworkSettings, ServerConfig};
 use crate::server::{ServerError, ServerResult};
+use arc_swap::ArcSwap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tracing::{debug, info};
 
@@ -143,6 +145,49 @@ impl TlsClientBuilder {
     }
 }
 
+// ─── LiveTlsAcceptor ─────────────────────────────────────────────────────────
+
+/// A TLS acceptor that can swap its certificate store without restarting.
+///
+/// Shares the same `ArcSwap<rustls::ServerConfig>` used by the cert-rotation
+/// path in `main.rs`, ensuring a single source of truth for the TLS
+/// configuration.  This is the *server-side config shim* — for the TCP-level
+/// acceptor (which wraps a `TcpListener`) see
+/// `amaters_net::tls_acceptor::LiveTlsAcceptor`.
+pub struct LiveTlsAcceptor {
+    config_store: Arc<ArcSwap<rustls::ServerConfig>>,
+}
+
+impl LiveTlsAcceptor {
+    /// Create a new acceptor backed by a shared config store.
+    pub fn new(config_store: Arc<ArcSwap<rustls::ServerConfig>>) -> Self {
+        Self { config_store }
+    }
+
+    /// Load the current TLS configuration.
+    pub fn current_config(&self) -> Arc<rustls::ServerConfig> {
+        self.config_store.load_full()
+    }
+
+    /// Update the TLS configuration (e.g., after certificate rotation).
+    ///
+    /// All *new* connections that call [`Self::make_acceptor`] after this
+    /// point will use the new configuration.  In-flight connections are
+    /// unaffected.
+    pub fn rotate(&self, new_config: Arc<rustls::ServerConfig>) {
+        self.config_store.store(new_config);
+    }
+
+    /// Build a `tokio_rustls::TlsAcceptor` from the current config.
+    ///
+    /// The returned acceptor captures a snapshot of the current config.
+    /// Call `make_acceptor()` again after [`Self::rotate`] to pick up the
+    /// new certificate.
+    pub fn make_acceptor(&self) -> tokio_rustls::TlsAcceptor {
+        tokio_rustls::TlsAcceptor::from(self.current_config())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +293,9 @@ mod tests {
                 audit_enabled: false,
                 audit_log_path: None,
             },
+            resource_limits: Default::default(),
+            circuit_cache: Default::default(),
+            timeouts: Default::default(),
         };
 
         (config, temp_dir)

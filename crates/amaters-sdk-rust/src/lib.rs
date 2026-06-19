@@ -119,6 +119,7 @@ pub mod connection;
 pub mod connection_manager;
 pub mod error;
 pub mod fhe;
+pub mod fhe_ops;
 pub mod mock;
 pub mod query;
 pub mod streaming;
@@ -137,6 +138,7 @@ pub use connection_manager::{
 };
 pub use error::{Result, SdkError};
 pub use fhe::{FheEncryptor, FheKeys};
+pub use fhe_ops::{FheValue, FheValueKind};
 pub use mock::{MockServerBuilder, MockServerHandle, MockStorage};
 pub use query::{FilterBuilder, FluentQueryBuilder, PredicateBuilder, query};
 pub use streaming::{QueryStream, Row, RowSender, StreamConfig, spawn_stub_producer};

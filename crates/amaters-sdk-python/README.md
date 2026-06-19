@@ -4,7 +4,8 @@ Python SDK for [AmateRS](https://github.com/cool-japan/amaters) — a distribute
 
 > **Status**: Alpha — API is stabilising. Not yet recommended for production use.
 
-- Version: 0.2.0
+- Version: 0.2.2
+- 80 tests
 - License: Apache-2.0
 
 ## Features
@@ -16,7 +17,7 @@ Python SDK for [AmateRS](https://github.com/cool-japan/amaters) — a distribute
 - **Range queries** — `range_query`, `count`, `keys` for key-range iteration
 - **Cursor-based pagination** — `scan` with `prefix` + `cursor` for large result sets
 - **Streaming iterators** — `range_stream` and `batch_stream` yield results in configurable chunks
-- **Connection pool statistics** — `pool_stats()` exposes live pool counters
+- **Connection pool statistics** — `pool_stats()` and `close()` are fully async awaitables
 - **Context manager protocol** — `with` statement calls `close()` on exit
 - **Python-idiomatic** — `__repr__`, `__str__`, `__contains__` on wrapper types
 - **Optional serialization** — enable the `serialization` feature for Oxicode encode/decode helpers
@@ -171,6 +172,15 @@ async def context_example():
         await client.set("col", b"key", b"value")
     # client.close() is called automatically on exit
 ```
+
+## Testing
+
+```bash
+# Run the Python test suite (no compiled extension required)
+pytest python/tests/ -v
+```
+
+The Python test suite contains 80 tests across 5 files (`test_config.py`, `test_types.py`, `test_client_operations.py`, `test_error_handling.py`, `test_properties.py`), including Hypothesis property-based tests. Tests use mock-backed clients and run without a live AmateRS server.
 
 ## Feature Flags
 

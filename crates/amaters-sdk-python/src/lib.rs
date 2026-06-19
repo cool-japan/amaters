@@ -14,6 +14,7 @@
 mod config;
 mod helpers;
 mod streaming;
+mod subscribe;
 mod types;
 
 #[cfg(test)]
@@ -31,7 +32,10 @@ use tokio::sync::Mutex;
 use config::{PyClientConfig, PyRetryConfig};
 use helpers::{convert_sdk_error, parse_batch_operations, python_to_key};
 use streaming::{PyBatchStreamIterator, PyStreamIterator};
-use types::{PyBatchResult, PyKey, PyScanResult, SendableQueryResult, query_result_to_sendable};
+use subscribe::{PyChangeEvent, PyWatchHandle, WatchRegistry};
+use types::{
+    PyBatchResult, PyKey, PyPoolStats, PyScanResult, SendableQueryResult, query_result_to_sendable,
+};
 
 /// Length of the saturated end-key sentinel used when a prefix has no
 /// representable lexicographic upper bound (i.e. is empty or contains
@@ -96,8 +100,8 @@ pub(crate) fn saturated_end_key() -> Vec<u8> {
 #[pyclass(name = "AmateRSClient")]
 struct PyAmateRSClient {
     client: Arc<Mutex<AmateRSClient>>,
-    runtime: Arc<tokio::runtime::Runtime>,
     server_addr: String,
+    watch_registry: Arc<std::sync::Mutex<WatchRegistry>>,
 }
 
 #[pymethods]
@@ -120,15 +124,10 @@ impl PyAmateRSClient {
                 .await
                 .map_err(convert_sdk_error)?;
 
-            let runtime =
-                Arc::new(tokio::runtime::Runtime::new().map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to create runtime: {e}"))
-                })?);
-
             Ok(PyAmateRSClient {
                 client: Arc::new(Mutex::new(client)),
-                runtime,
                 server_addr: addr_clone,
+                watch_registry: Arc::new(std::sync::Mutex::new(WatchRegistry::default())),
             })
         })
     }
@@ -152,15 +151,10 @@ impl PyAmateRSClient {
                 .await
                 .map_err(convert_sdk_error)?;
 
-            let runtime =
-                Arc::new(tokio::runtime::Runtime::new().map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to create runtime: {e}"))
-                })?);
-
             Ok(PyAmateRSClient {
                 client: Arc::new(Mutex::new(client)),
-                runtime,
                 server_addr: addr,
+                watch_registry: Arc::new(std::sync::Mutex::new(WatchRegistry::default())),
             })
         })
     }
@@ -926,24 +920,33 @@ impl PyAmateRSClient {
     ///         - total_connections (int)
     ///         - idle_connections (int)
     ///         - active_connections (int)
-    fn pool_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let client = self.runtime.block_on(async { self.client.lock().await });
-        let stats = client.pool_stats();
+    fn pool_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
 
-        let dict = PyDict::new(py);
-        dict.set_item("total_connections", stats.total_connections)?;
-        dict.set_item("idle_connections", stats.idle_connections)?;
-        dict.set_item("active_connections", stats.active_connections)?;
-
-        Ok(dict)
+        future_into_py(py, async move {
+            let client = client.lock().await;
+            let stats = client.pool_stats();
+            Ok(PyPoolStats {
+                total_connections: stats.total_connections,
+                active_connections: stats.active_connections,
+                idle_connections: stats.idle_connections,
+                max_connections: stats.max_connections,
+            })
+        })
     }
 
     /// Close all connections
     ///
-    /// This is called automatically when using the context manager protocol.
-    fn close(&self) {
-        let client = self.runtime.block_on(async { self.client.lock().await });
-        client.close();
+    /// Returns a coroutine that resolves once the client has been fully closed.
+    /// Use this in an `async with` block or explicitly `await` it.
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+
+        future_into_py(py, async move {
+            let client = client.lock().await;
+            client.close();
+            Ok(())
+        })
     }
 
     /// Context manager entry - enables `with` statement
@@ -955,14 +958,20 @@ impl PyAmateRSClient {
         slf
     }
 
-    /// Context manager exit - closes connections on exit
+    /// Context manager exit - performs a best-effort synchronous close.
+    ///
+    /// Attempts to acquire the client lock without blocking.  If the lock is
+    /// held (i.e. an async operation is in flight) the close is skipped here;
+    /// the caller should `await client.close()` explicitly in async code.
     fn __exit__(
         &self,
         _exc_type: &Bound<PyAny>,
         _exc_value: &Bound<PyAny>,
         _traceback: &Bound<PyAny>,
     ) {
-        self.close();
+        if let Ok(client) = self.client.try_lock() {
+            client.close();
+        }
     }
 
     /// String representation for debugging
@@ -973,6 +982,66 @@ impl PyAmateRSClient {
     /// Human-readable string representation
     fn __str__(&self) -> String {
         format!("AmateRSClient connected to {}", self.server_addr)
+    }
+
+    /// Subscribe to change notifications for a collection.
+    ///
+    /// Returns a :class:`WatchHandle` that you can poll for events.
+    ///
+    /// Args:
+    ///     collection (str): Collection name to watch.
+    ///
+    /// Returns:
+    ///     WatchHandle: A handle for polling change events.
+    ///
+    /// Example:
+    ///     >>> handle = client.watch("orders")
+    ///     >>> events = handle.poll_events(10)
+    fn watch(&self, collection: String) -> PyResult<PyWatchHandle> {
+        match self.watch_registry.lock() {
+            Ok(mut registry) => {
+                let queue = registry.subscribe(&collection);
+                Ok(PyWatchHandle {
+                    collection,
+                    queue,
+                    closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                })
+            }
+            Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Failed to acquire watch registry lock",
+            )),
+        }
+    }
+
+    /// Emit a synthetic change event to all watchers of a collection.
+    ///
+    /// This is primarily for testing: it injects a change event as if the
+    /// server had sent one, so you can verify that watch handles receive it.
+    ///
+    /// Args:
+    ///     collection (str): Collection name.
+    ///     event_type (str): Event type — "insert", "update", or "delete".
+    ///     record_id (int | None): Optional record identifier.
+    ///
+    /// Example:
+    ///     >>> client.emit_change("orders", "insert", 42)
+    ///     >>> events = handle.poll_events(10)
+    #[pyo3(signature = (collection, event_type, record_id=None))]
+    fn emit_change(
+        &self,
+        collection: String,
+        event_type: String,
+        record_id: Option<u64>,
+    ) -> PyResult<()> {
+        match self.watch_registry.lock() {
+            Ok(mut registry) => {
+                registry.emit(&collection, event_type, record_id);
+                Ok(())
+            }
+            Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Failed to acquire watch registry lock",
+            )),
+        }
     }
 }
 
@@ -987,6 +1056,9 @@ fn _internal(m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyStreamIterator>()?;
     m.add_class::<PyBatchStreamIterator>()?;
     m.add_class::<PyScanResult>()?;
+    m.add_class::<PyPoolStats>()?;
+    m.add_class::<PyChangeEvent>()?;
+    m.add_class::<PyWatchHandle>()?;
 
     // Version
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

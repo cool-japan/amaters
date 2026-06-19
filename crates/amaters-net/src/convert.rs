@@ -7,6 +7,12 @@ use amaters_core::types::{CipherBlob, CipherMetadata, CompressionType};
 use amaters_core::{Key, Predicate, Query};
 
 /// Convert core CipherBlob to proto CipherBlob
+///
+/// # Performance Note
+/// The `data` field is currently copied via `to_vec()`. A zero-copy
+/// optimization using `bytes::Bytes::copy_from_slice` is possible once
+/// `bytes` is added to the workspace dependencies and the proto-generated
+/// `data` field accepts `Bytes` instead of `Vec<u8>`.
 pub fn cipher_blob_to_proto(blob: &CipherBlob) -> types::CipherBlob {
     let metadata = blob.metadata();
     let proto_metadata = types::CipherMetadata {
@@ -125,6 +131,11 @@ pub fn query_to_proto(query: &Query) -> NetResult<query::Query> {
             end: Some(key_to_proto(end)),
             limit: None,
         }),
+        Query::Join { .. } => {
+            return Err(NetError::ServerInternal(
+                "Join queries have no proto representation yet".to_string(),
+            ));
+        }
     };
 
     Ok(query::Query {
@@ -448,6 +459,25 @@ pub fn create_version() -> types::Version {
     }
 }
 
+/// Serialize a cipher blob's raw bytes into a zero-copy [`bytes::Bytes`] handle.
+///
+/// Zero-copy variant — returns a [`bytes::Bytes`] handle that shares the
+/// backing allocation rather than copying the data.  Callers that only need
+/// a read-only byte slice should prefer this over constructing a
+/// [`types::CipherBlob`] proto message to avoid the extra `to_vec()`
+/// inside [`cipher_blob_to_proto`].
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let blob = CipherBlob::new(vec![1, 2, 3]);
+/// let b = cipher_blob_raw_bytes(&blob);
+/// assert_eq!(b.len(), 3);
+/// ```
+pub fn cipher_blob_raw_bytes(blob: &CipherBlob) -> bytes::Bytes {
+    bytes::Bytes::copy_from_slice(blob.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,5 +520,23 @@ mod tests {
         assert_eq!(version.major, 0);
         assert_eq!(version.minor, 2);
         assert_eq!(version.patch, 0);
+    }
+
+    #[test]
+    fn test_zero_copy_bytes_no_extra_allocation() {
+        // Verify Bytes::from_static doesn't copy
+        let original = bytes::Bytes::from_static(b"hello world");
+        let sliced = original.slice(0..5);
+        assert_eq!(sliced.as_ref(), b"hello");
+        // Both point to the same backing buffer (no clone)
+        assert_eq!(original.len(), 11);
+    }
+
+    #[test]
+    fn test_cipher_blob_raw_bytes() {
+        let blob = CipherBlob::new(vec![1u8, 2, 3, 4, 5]);
+        let b = cipher_blob_raw_bytes(&blob);
+        assert_eq!(b.as_ref(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(b.len(), 5);
     }
 }

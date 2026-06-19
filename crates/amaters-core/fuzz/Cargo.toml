@@ -1,0 +1,31 @@
+[package]
+name = "amaters-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+amaters-core = { path = "..", features = ["storage"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "fuzz_predicate_parser"
+path = "fuzz_targets/fuzz_predicate_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_circuit_validation"
+path = "fuzz_targets/fuzz_circuit_validation.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_index_operations"
+path = "fuzz_targets/fuzz_index_operations.rs"
+test = false
+doc = false

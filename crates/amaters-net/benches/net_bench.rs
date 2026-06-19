@@ -647,6 +647,96 @@ fn bench_grpc_batch(c: &mut Criterion) {
 // Criterion harness
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// CircuitCache benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_circuit_cache(c: &mut Criterion) {
+    use amaters_core::compute::circuit::{Circuit, CircuitNode, CircuitValue};
+    use amaters_core::types::CipherBlob;
+    use amaters_core::{ColumnRef, Predicate};
+    use amaters_net::circuit_cache::{CircuitCache, CircuitCacheConfig, CircuitCacheKey};
+    use std::collections::HashMap;
+    use std::hint::black_box;
+
+    fn make_circuit() -> Circuit {
+        let root = CircuitNode::Constant(CircuitValue::Bool(true));
+        Circuit::new(root, HashMap::new()).expect("simple circuit")
+    }
+
+    fn make_predicate(i: u8) -> Predicate {
+        Predicate::Eq(ColumnRef::new("col"), CipherBlob::new(vec![i]))
+    }
+
+    let mut group = c.benchmark_group("circuit_cache");
+    group.throughput(Throughput::Elements(1));
+
+    // Cache hit: key already present
+    group.bench_function("hit", |b| {
+        let cache = CircuitCache::new(CircuitCacheConfig::new(256));
+        let pred = make_predicate(1);
+        let key = CircuitCacheKey::from_predicate(&pred);
+        cache.insert(key, make_circuit());
+        b.iter(|| {
+            black_box(cache.get(&CircuitCacheKey::from_predicate(&pred)));
+        });
+    });
+
+    // Cache miss: key not present
+    group.bench_function("miss", |b| {
+        let cache = CircuitCache::new(CircuitCacheConfig::new(256));
+        let pred = make_predicate(99);
+        b.iter(|| {
+            black_box(cache.get(&CircuitCacheKey::from_predicate(&pred)));
+        });
+    });
+
+    // get_or_compile hit (closure must NOT be called)
+    group.bench_function("get_or_compile_hit", |b| {
+        let cache = CircuitCache::new(CircuitCacheConfig::new(256));
+        let pred = make_predicate(42);
+        cache
+            .get_or_compile(&pred, || Ok(make_circuit()))
+            .expect("seed failed");
+        b.iter(|| {
+            black_box(
+                cache
+                    .get_or_compile(&pred, || panic!("should not compile on hit"))
+                    .expect("hit"),
+            )
+        });
+    });
+
+    // get_or_compile miss (closure compiles a simple circuit each time)
+    group.bench_function("get_or_compile_miss", |b| {
+        let mut i = 0u8;
+        b.iter(|| {
+            let pred = make_predicate(i);
+            i = i.wrapping_add(1);
+            let cache = CircuitCache::new(CircuitCacheConfig::new(256));
+            black_box(
+                cache
+                    .get_or_compile(&pred, || Ok(make_circuit()))
+                    .expect("ok"),
+            )
+        });
+    });
+
+    // LRU eviction: insert into a capacity-2 cache
+    group.bench_function("lru_eviction", |b| {
+        let cache = CircuitCache::new(CircuitCacheConfig::new(2));
+        let mut i = 0u8;
+        b.iter(|| {
+            let pred = make_predicate(i);
+            let key = CircuitCacheKey::from_predicate(&pred);
+            cache.insert(key, make_circuit());
+            i = i.wrapping_add(1);
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_circuit_breaker,
@@ -658,5 +748,6 @@ criterion_group!(
     bench_grpc_delete,
     bench_grpc_range,
     bench_grpc_batch,
+    bench_circuit_cache,
 );
 criterion_main!(benches);

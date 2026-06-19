@@ -56,6 +56,9 @@ pub struct ClusterMetrics {
     pub peer_count: AtomicU64,
     /// Number of entries in the Raft log.
     pub log_entry_count: AtomicU64,
+    /// Current cluster imbalance ratio (scaled by 1000 for 3 decimal places).
+    /// Read back as `current_imbalance_gauge.load(Ordering::Relaxed) as f64 / 1000.0`.
+    pub current_imbalance_gauge: AtomicU64,
 
     // --- Histogram ---
     /// Raw latency observations (microseconds) for AppendEntries round-trips.
@@ -80,6 +83,7 @@ impl Default for ClusterMetrics {
             applied_index: AtomicU64::new(0),
             peer_count: AtomicU64::new(0),
             log_entry_count: AtomicU64::new(0),
+            current_imbalance_gauge: AtomicU64::new(0),
             latency_observations_us: RwLock::new(Vec::new()),
         }
     }
@@ -187,6 +191,20 @@ impl ClusterMetrics {
     #[inline]
     pub fn set_log_entry_count(&self, count: u64) {
         self.log_entry_count.store(count, Ordering::Relaxed);
+    }
+
+    /// Set the current imbalance gauge (stores `value * 1000` as u64).
+    #[inline]
+    pub fn set_imbalance(&self, value: f64) {
+        let scaled = (value * 1000.0).round() as u64;
+        self.current_imbalance_gauge
+            .store(scaled, Ordering::Relaxed);
+    }
+
+    /// Read the current imbalance gauge as f64.
+    #[inline]
+    pub fn get_imbalance(&self) -> f64 {
+        self.current_imbalance_gauge.load(Ordering::Relaxed) as f64 / 1000.0
     }
 
     // -------------------------------------------------------------------------
@@ -299,6 +317,15 @@ impl ClusterMetrics {
             "Number of entries currently in the Raft log",
             self.log_entry_count.load(Ordering::Relaxed),
         );
+
+        // Imbalance gauge (rendered as float)
+        let imbalance_val = self.get_imbalance();
+        out.push_str("# HELP amaters_current_imbalance_ratio Current cluster imbalance ratio\n");
+        out.push_str("# TYPE amaters_current_imbalance_ratio gauge\n");
+        out.push_str(&format!(
+            "amaters_current_imbalance_ratio {:.3}\n",
+            imbalance_val
+        ));
 
         // --- Histogram ---
         let observations = self.latency_observations_us.read();

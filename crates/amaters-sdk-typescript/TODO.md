@@ -1,5 +1,11 @@
 # amaters-sdk-typescript TODO
 
+## v0.2.2 (2026-06-19)
+
+### Completed
+- [x] Test suite expanded: 91 tests (up from 84)
+- [x] Additional streaming and transport test coverage
+
 ## v0.2.0 (2026-04-26)
 
 ### Completed
@@ -18,7 +24,7 @@
 - [x] Subscription/streaming handle in transport layer (`src/transport.rs`)
 - [x] Error types with retry semantics (`ErrorCode`, `AmateRSError`)
 - [x] Node.js and browser dual export (`package.json` exports map)
-- [x] 84 passing tests
+- [x] 84 passing tests (v0.2.0 baseline; 91 tests as of v0.2.2)
 
 ### Planned
 - [x] Streaming query support as async iteration in TypeScript layer (`AsyncIterableIterator<KeyValuePair>`) (done 2026-05-08)
@@ -31,7 +37,7 @@
     - Rust: `test_validate_stream_args_rejects_empty_url`, `test_validate_stream_args_rejects_empty_collection`, `test_validate_stream_args_rejects_invalid_json`, `test_validate_stream_args_accepts_valid_inputs`, `test_wasm_stream_query_export_exists` (compile-only; native tests cannot drive WASM async).
     - TypeScript: 14 tests total in `test/streaming.test.ts` covering synchronous push, asynchronous push, queue draining, parked-pull resolve-on-push, `return()` cancellation that drops post-cancel chunks, `return()` cancellation that drains pending parked pulls, `for-await-of break` triggers `return()`, error propagation to pending pulls, eager error before consumer pulls, dropping chunks after `onDone`, idempotent `Symbol.asyncIterator`, end-to-end stub yield, mid-stream cancellation, error on empty server URL / empty collection. Driven via `createStreamIterator` directly with fake producers — no WASM dependency.
   - **Risk:** (a) Async-iterator + WASM-callback bridge backpressure is implicit (consumer pulls before next chunk); documented in rustdoc + JSDoc. (b) `KeyValuePair` name collision avoided by reusing the existing public type instead of redefining as `{key: string; value: string}` per the original pseudocode. (c) Stub producer in the Rust side fires all chunks synchronously inside one future poll; the TS-side stub uses microtask-staggered emission so consumer-side cancellation is exercised meaningfully. Both stubs go away once the real server-streaming RPC lands.
-- [ ] WebSocket transport option for browser environments
+- [x] WebSocket transport option for browser environments
 - [x] `isInitialized()` real state tracking + `query()` wired to new WASM export (done 2026-05-07)
   - **Goal:** Track WASM init state honestly; surface a working `query()` that auto-inits and dispatches to a real wasm-bindgen export instead of throwing.
   - **Design:**
@@ -41,4 +47,4 @@
   - **Tests:** `test_initialized_state_tracking`, `test_set_initialized_and_reset`, `test_query_export_exists`
 - [ ] npm package publish (`@amaters/sdk`)
 - [ ] ESLint + Prettier CI enforcement
-- [ ] WASM headless browser test suite (`wasm-pack test --headless --chrome`)
+- [x] WASM headless browser test suite (`wasm-pack test --headless --chrome`)

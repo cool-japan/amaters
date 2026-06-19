@@ -15,6 +15,7 @@
 //! | [`RateLimitMiddleware`] | Token-bucket rate limiting |
 //! | [`TracingMiddleware`] | Creates a tracing span per request |
 
+use constant_time_eq::constant_time_eq;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
@@ -524,8 +525,9 @@ impl TracingMiddleware {
 impl Middleware for TracingMiddleware {
     async fn process(&self, ctx: &mut RequestContext, next: &dyn Next) -> Result<Response> {
         let span = tracing::info_span!(
-            "request",
-            request_id = %ctx.request_id,
+            "amaters.request",
+            "amaters.node_id" = "local",
+            "amaters.request_id" = %ctx.request_id,
             method = %ctx.method,
             client_addr = ?ctx.client_addr,
         );
@@ -540,6 +542,50 @@ impl Middleware for TracingMiddleware {
 
     fn order(&self) -> i32 {
         -95
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OtelSpanMiddleware
+// ---------------------------------------------------------------------------
+
+/// Creates OTel-compatible spans for key server lifecycle events.
+///
+/// Unlike [`TracingMiddleware`] (which uses a static `"local"` node id),
+/// `OtelSpanMiddleware` carries a real `node_id` that is known at construction
+/// time, enabling per-node filtering in distributed tracing back-ends.
+pub struct OtelSpanMiddleware {
+    node_id: String,
+}
+
+impl OtelSpanMiddleware {
+    pub fn new(node_id: impl Into<String>) -> Self {
+        Self {
+            node_id: node_id.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Middleware for OtelSpanMiddleware {
+    async fn process(&self, ctx: &mut RequestContext, next: &dyn Next) -> Result<Response> {
+        let span = tracing::info_span!(
+            "amaters.server.request",
+            "amaters.node_id" = self.node_id.as_str(),
+            "amaters.request_id" = %ctx.request_id,
+            "amaters.method" = %ctx.method,
+        );
+
+        let _guard = span.enter();
+        next.run(ctx).await
+    }
+
+    fn name(&self) -> &str {
+        "otel_span"
+    }
+
+    fn order(&self) -> i32 {
+        -97
     }
 }
 
@@ -582,8 +628,15 @@ impl Middleware for AuthMiddleware {
 
         match auth_header {
             Some(key) => {
-                // Try API-key lookup.
-                if let Some(user_id) = self.api_keys.get(&key) {
+                // Try API-key lookup with constant-time comparison to prevent
+                // timing side-channel attacks on the stored key values.
+                let key_bytes = key.as_bytes();
+                if let Some(user_id) = self
+                    .api_keys
+                    .iter()
+                    .find(|(k, _)| constant_time_eq(k.as_bytes(), key_bytes))
+                    .map(|(_, v)| v)
+                {
                     ctx.set_attribute("auth_principal", user_id.clone());
                     debug!(
                         request_id = %ctx.request_id,
@@ -690,6 +743,159 @@ impl Middleware for RateLimitMiddleware {
 
     fn order(&self) -> i32 {
         -70
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AdaptiveRateLimiter / AdaptiveRateLimitMiddleware
+// ---------------------------------------------------------------------------
+
+/// Adaptive rate limiter that reduces effective limits on high error rates.
+///
+/// Tracks a rolling window of request outcomes. When the error rate exceeds
+/// `error_threshold`, the effective limit is multiplied by `reduction_factor`.
+/// When the error rate drops back below the threshold, the limit recovers
+/// multiplicatively by `recovery_factor`, capped at `base_limit`.
+pub struct AdaptiveRateLimiter {
+    base_limit: u64,
+    current_limit: Arc<parking_lot::Mutex<u64>>,
+    error_window: Arc<parking_lot::Mutex<std::collections::VecDeque<bool>>>,
+    window_size: usize,
+    reduction_factor: f64,
+    recovery_factor: f64,
+    error_threshold: f64,
+}
+
+impl AdaptiveRateLimiter {
+    /// Create with `base_limit` tokens, default window (100), reduction 0.8,
+    /// recovery 1.05, error threshold 10 %.
+    pub fn new(base_limit: u64) -> Self {
+        Self {
+            base_limit,
+            current_limit: Arc::new(parking_lot::Mutex::new(base_limit)),
+            error_window: Arc::new(parking_lot::Mutex::new(
+                std::collections::VecDeque::with_capacity(101),
+            )),
+            window_size: 100,
+            reduction_factor: 0.8,
+            recovery_factor: 1.05,
+            error_threshold: 0.1,
+        }
+    }
+
+    /// Record a successful request and potentially recover the limit.
+    pub fn record_success(&self) {
+        self.push(false);
+        self.adjust();
+    }
+
+    /// Record a failed/errored request and potentially reduce the limit.
+    pub fn record_error(&self) {
+        self.push(true);
+        self.adjust();
+    }
+
+    /// Current effective token-bucket capacity.
+    pub fn current_limit(&self) -> u64 {
+        *self.current_limit.lock()
+    }
+
+    fn push(&self, is_error: bool) {
+        let mut window = self.error_window.lock();
+        if window.len() >= self.window_size {
+            window.pop_front();
+        }
+        window.push_back(is_error);
+    }
+
+    fn adjust(&self) {
+        let error_rate = {
+            let window = self.error_window.lock();
+            if window.is_empty() {
+                return;
+            }
+            let errors = window.iter().filter(|&&e| e).count();
+            errors as f64 / window.len() as f64
+        };
+
+        let mut limit = self.current_limit.lock();
+        if error_rate >= self.error_threshold {
+            let reduced = (*limit as f64 * self.reduction_factor).floor() as u64;
+            *limit = reduced.max(1);
+        } else {
+            let recovered = (*limit as f64 * self.recovery_factor).ceil() as u64;
+            *limit = recovered.min(self.base_limit);
+        }
+    }
+}
+
+/// Middleware wrapper around [`AdaptiveRateLimiter`].
+///
+/// Maintains a token-bucket whose *capacity* tracks the limiter's current
+/// effective limit. On a successful token acquisition it records a success;
+/// when the bucket is exhausted it records an error, which may further reduce
+/// the effective limit.
+pub struct AdaptiveRateLimitMiddleware {
+    limiter: Arc<AdaptiveRateLimiter>,
+    token_state: Arc<parking_lot::Mutex<RateLimitState>>,
+}
+
+impl AdaptiveRateLimitMiddleware {
+    pub fn new(base_limit: u64) -> Self {
+        let limiter = Arc::new(AdaptiveRateLimiter::new(base_limit));
+        Self {
+            token_state: Arc::new(parking_lot::Mutex::new(RateLimitState {
+                tokens: base_limit as f64,
+                last_refill: Instant::now(),
+            })),
+            limiter,
+        }
+    }
+
+    fn try_acquire(&self) -> bool {
+        let capacity = self.limiter.current_limit() as f64;
+        let mut state = self.token_state.lock();
+        let now = Instant::now();
+        let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+        // Refill at a rate equal to capacity per second, capped at capacity.
+        state.tokens = (state.tokens + elapsed * capacity).min(capacity);
+        state.last_refill = now;
+
+        if state.tokens >= 1.0 {
+            state.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[async_trait]
+impl Middleware for AdaptiveRateLimitMiddleware {
+    async fn process(&self, ctx: &mut RequestContext, next: &dyn Next) -> Result<Response> {
+        if self.try_acquire() {
+            let result = next.run(ctx).await;
+            match &result {
+                Ok(resp) if resp.status == ResponseStatus::Ok => self.limiter.record_success(),
+                _ => self.limiter.record_error(),
+            }
+            result
+        } else {
+            self.limiter.record_error();
+            warn!(
+                request_id = %ctx.request_id,
+                "Adaptive rate limit exceeded"
+            );
+            Ok(Response::rate_limited("Adaptive rate limit exceeded"))
+        }
+    }
+
+    fn name(&self) -> &str {
+        "adaptive_rate_limit"
+    }
+
+    fn order(&self) -> i32 {
+        -65
     }
 }
 
@@ -1174,5 +1380,41 @@ mod tests {
         let r2 = Response::error("oops");
         assert_eq!(r2.status, ResponseStatus::Error);
         assert_eq!(r2.body, Some(b"oops".to_vec()));
+    }
+
+    #[test]
+    fn test_adaptive_rate_limiter_reduces_on_errors() {
+        let limiter = AdaptiveRateLimiter::new(100);
+        assert_eq!(limiter.current_limit(), 100);
+
+        // Flood the window with errors (>10% threshold).
+        for _ in 0..50 {
+            limiter.record_error();
+        }
+        assert!(
+            limiter.current_limit() < 100,
+            "limit should have decreased after high error rate"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_rate_limiter_recovers() {
+        let limiter = AdaptiveRateLimiter::new(100);
+
+        // Drive the limit down first.
+        for _ in 0..50 {
+            limiter.record_error();
+        }
+        let reduced = limiter.current_limit();
+        assert!(reduced < 100, "limit should be reduced");
+
+        // Now flood with successes to push error rate below threshold.
+        for _ in 0..200 {
+            limiter.record_success();
+        }
+        assert!(
+            limiter.current_limit() > reduced,
+            "limit should recover after sustained successes"
+        );
     }
 }

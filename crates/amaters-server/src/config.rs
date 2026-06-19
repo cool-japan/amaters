@@ -62,6 +62,18 @@ pub struct ServerConfig {
     /// Authorization settings
     #[serde(default)]
     pub authz: AuthorizationSettings,
+
+    /// Resource limits
+    #[serde(default)]
+    pub resource_limits: ResourceLimits,
+
+    /// Circuit cache settings for FHE operations
+    #[serde(default)]
+    pub circuit_cache: CircuitCacheSettings,
+
+    /// Timeout configuration
+    #[serde(default)]
+    pub timeouts: TimeoutConfig,
 }
 
 /// Server-specific settings
@@ -517,6 +529,118 @@ fn default_permission_mode() -> String {
     "deny-by-default".to_string()
 }
 
+fn default_max_connections_per_client() -> usize {
+    10
+}
+
+fn default_max_rps_global() -> u64 {
+    10_000
+}
+
+fn default_max_active_queries() -> usize {
+    1000
+}
+
+fn default_circuit_cache_max_entries() -> usize {
+    1000
+}
+
+fn default_circuit_cache_ttl_secs() -> u64 {
+    300
+}
+
+fn default_request_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_idle_connection_timeout_ms() -> u64 {
+    60_000
+}
+
+fn default_graceful_shutdown_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_keep_alive_interval_ms() -> u64 {
+    15_000
+}
+
+/// Per-client and global resource limits
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    /// Maximum concurrent connections per client IP
+    #[serde(default = "default_max_connections_per_client")]
+    pub max_connections_per_client: usize,
+    /// Global maximum requests per second
+    #[serde(default = "default_max_rps_global")]
+    pub max_requests_per_second_global: u64,
+    /// Maximum memory usage in bytes (None = unlimited)
+    #[serde(default)]
+    pub max_memory_bytes: Option<u64>,
+    /// Maximum number of concurrently active queries
+    #[serde(default = "default_max_active_queries")]
+    pub max_active_queries: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_connections_per_client: default_max_connections_per_client(),
+            max_requests_per_second_global: default_max_rps_global(),
+            max_memory_bytes: None,
+            max_active_queries: default_max_active_queries(),
+        }
+    }
+}
+
+/// Circuit cache settings for FHE operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitCacheSettings {
+    /// Maximum number of cached circuit entries
+    #[serde(default = "default_circuit_cache_max_entries")]
+    pub max_entries: usize,
+    /// TTL for cache entries in seconds
+    #[serde(default = "default_circuit_cache_ttl_secs")]
+    pub ttl_secs: u64,
+}
+
+impl Default for CircuitCacheSettings {
+    fn default() -> Self {
+        Self {
+            max_entries: default_circuit_cache_max_entries(),
+            ttl_secs: default_circuit_cache_ttl_secs(),
+        }
+    }
+}
+
+/// Connection timeout configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeoutConfig {
+    /// Request timeout in milliseconds
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    /// Idle connection timeout in milliseconds
+    #[serde(default = "default_idle_connection_timeout_ms")]
+    pub idle_connection_timeout_ms: u64,
+    /// Graceful shutdown timeout in milliseconds
+    #[serde(default = "default_graceful_shutdown_timeout_ms")]
+    pub graceful_shutdown_timeout_ms: u64,
+    /// Keep-alive interval in milliseconds
+    #[serde(default = "default_keep_alive_interval_ms")]
+    pub keep_alive_interval_ms: u64,
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_ms: default_request_timeout_ms(),
+            idle_connection_timeout_ms: default_idle_connection_timeout_ms(),
+            graceful_shutdown_timeout_ms: default_graceful_shutdown_timeout_ms(),
+            keep_alive_interval_ms: default_keep_alive_interval_ms(),
+        }
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -558,6 +682,9 @@ impl Default for ServerConfig {
             },
             auth: AuthSettings::default(),
             authz: AuthorizationSettings::default(),
+            resource_limits: ResourceLimits::default(),
+            circuit_cache: CircuitCacheSettings::default(),
+            timeouts: TimeoutConfig::default(),
         }
     }
 }
@@ -834,6 +961,13 @@ impl ServerConfig {
                     )));
                 }
             }
+        }
+
+        // Validate timeout ordering: request_timeout < idle_connection_timeout
+        if self.timeouts.request_timeout_ms >= self.timeouts.idle_connection_timeout_ms {
+            return Err(ConfigError::Validation(
+                "request_timeout_ms must be less than idle_connection_timeout_ms".to_string(),
+            ));
         }
 
         Ok(())
@@ -1625,5 +1759,45 @@ mod tests {
         assert_eq!(reloadable.read().logging.level, "error");
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_resource_limits_defaults() {
+        let config = ServerConfig::default();
+        assert_eq!(config.resource_limits.max_connections_per_client, 10);
+        assert_eq!(
+            config.resource_limits.max_requests_per_second_global,
+            10_000
+        );
+        assert!(config.resource_limits.max_memory_bytes.is_none());
+        assert_eq!(config.resource_limits.max_active_queries, 1000);
+    }
+
+    #[test]
+    fn test_circuit_cache_defaults() {
+        let config = ServerConfig::default();
+        assert_eq!(config.circuit_cache.max_entries, 1000);
+        assert_eq!(config.circuit_cache.ttl_secs, 300);
+    }
+
+    #[test]
+    fn test_timeout_config_defaults() {
+        let config = ServerConfig::default();
+        assert_eq!(config.timeouts.request_timeout_ms, 30_000);
+        assert_eq!(config.timeouts.idle_connection_timeout_ms, 60_000);
+        assert_eq!(config.timeouts.keep_alive_interval_ms, 15_000);
+    }
+
+    #[test]
+    fn test_timeout_validation_ordering() {
+        let mut config = ServerConfig::default();
+        // Set request_timeout >= idle_timeout - should fail
+        config.timeouts.request_timeout_ms = 60_000;
+        config.timeouts.idle_connection_timeout_ms = 30_000;
+        assert!(config.validate().is_err());
+        // Fix it
+        config.timeouts.request_timeout_ms = 30_000;
+        config.timeouts.idle_connection_timeout_ms = 60_000;
+        assert!(config.validate().is_ok());
     }
 }

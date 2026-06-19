@@ -82,18 +82,24 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod compute;
+pub mod crypto;
 pub mod error;
 pub mod memory_limiter;
 pub mod metrics;
+pub mod profiling;
 pub mod storage;
+#[cfg(feature = "telemetry")]
+pub mod telemetry;
 pub mod traits;
 pub mod types;
 pub mod utils;
 pub mod validation;
 
 // Re-exports for convenience
+pub use crypto::{constant_time_eq, constant_time_select, constant_time_select_slice};
 pub use error::{AmateRSError, ErrorContext, Result};
 pub use metrics::CoreMetrics;
+pub use profiling::{ProfilingGuard, ProfilingSummary};
 pub use traits::StorageEngine;
 pub use types::{CipherBlob, ColumnRef, Key, Predicate, Query, QueryBuilder, Update, col};
 

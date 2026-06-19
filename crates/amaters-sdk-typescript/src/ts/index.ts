@@ -982,6 +982,9 @@ export function isInitialized(): boolean {
   return _initialized;
 }
 
+export { WebSocketTransport } from './ws_transport';
+export type { WsTransportConfig, MessageHandler, ErrorHandler } from './ws_transport';
+
 // Default export with all types and functions
 export default {
   ErrorCode,

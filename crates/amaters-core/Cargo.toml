@@ -24,7 +24,7 @@ futures = { workspace = true }
 
 # Serialization
 rkyv = { workspace = true }
-oxicode = { workspace = true, optional = true }
+oxicode = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
@@ -44,6 +44,7 @@ crc32fast = { workspace = true }
 oxiarc-lz4 = { workspace = true }
 oxiarc-deflate = { workspace = true }
 blake3 = { workspace = true }
+siphasher = { workspace = true }
 num_cpus = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -54,6 +55,17 @@ serde_json = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+
+# OpenTelemetry (feature-gated)
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry-semantic-conventions = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-uring = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
@@ -66,12 +78,14 @@ criterion = { workspace = true }
 [features]
 default = ["storage", "compute"]
 storage = []
-compute = ["tfhe", "oxicode"]
+compute = ["tfhe"]
 parallel = ["rayon"]
 mmap = ["memmap2"]
 gpu = []
 cuda = ["gpu"]
 metal = ["gpu"]
+telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-semantic-conventions", "dep:tracing-opentelemetry", "dep:tracing-subscriber"]
+io-uring = ["dep:tokio-uring"]
 
 [lib]
 name = "amaters_core"
@@ -84,6 +98,11 @@ harness = false
 [[bench]]
 name = "storage_bench"
 harness = false
+
+[[bench]]
+name = "fhe_benchmarks"
+harness = false
+required-features = ["compute"]
 
 [lints]
 workspace = true

@@ -31,11 +31,16 @@
   - [x] Decrypt results (stub)
   - [x] Verify integrity
   - [x] Handle errors
-- [ ] FHE operations (requires `fhe` feature)
-  - [ ] Addition
-  - [ ] Multiplication
-  - [ ] Comparison
-  - [ ] Boolean operations
+- [x] FHE operations (requires `fhe` feature)
+  - **Goal:** Expose client-side homomorphic add/sub/mul, eq/ne/lt/le/gt/ge comparisons, and/or/xor/not boolean ops on encrypted values via a new `FheValue` wrapper type under the `fhe` feature.
+  - **Design:** Add `ServerKey` to `FheKeys` (currently ClientKey-only); add `boolean`, `shortint`, `integer` to the sdk-rust `tfhe` dep feature list (Cargo.toml:33, to match core). Introduce `FheValue { inner: FheValueInner }` (enum over `EncryptedBool`, `EncryptedU8..U64` from `amaters_core::compute`), or thin tfhe wrappers if core dep is undesired. `set_as_global_server_key` in op context. Add `FheValue::encrypt_u8/u16/u32/u64/bool`, `decrypt_*`, and the op methods.
+  - **Files:** `src/fhe.rs` (extended), or introduce `src/fhe_ops.rs` (new) if `fhe.rs` grows beyond 600 lines; `Cargo.toml` (add features to tfhe dep)
+  - **Tests:** `test_fhe_addition` (enc(5)+enc(3)==8); `test_fhe_multiplication`; `test_fhe_comparison_all_ops` (eq/ne/lt/le/gt/ge); `test_fhe_boolean_and_or_xor_not` — all gated `#[cfg(feature="fhe")]`
+  - **Risk:** tfhe compile weight (feature "fhe" is opt-in, default off); thread-local server key per `set_as_global_server_key`. Mitigation: feature gate ensures CI default-features is unaffected; document thread requirement.
+  - [x] Addition
+  - [x] Multiplication
+  - [x] Comparison
+  - [x] Boolean operations
 
 ## Phase 3: Query API ✅
 
@@ -52,8 +57,8 @@
   - [x] Arithmetic operations
 - [x] Range queries
   - [x] Key ranges
-  - [ ] Pagination (requires server implementation)
-  - [ ] Ordering (requires server implementation)
+  - [x] Pagination (client-side implementation complete via `PaginationConfig`/`PaginatedResult`/cursor-based pagination; server-side pushdown is a future enhancement)
+  - [x] Ordering (client-side implementation complete via `SortOrder`/`SortField`/`SortConfig`; server-side pushdown is a future enhancement)
 
 ## Phase 4: Advanced Features 📋
 
@@ -152,15 +157,15 @@
 - Property-based tests (proptest strategies for `QueryBuilder`, `AmatersError`, codec)
 - Unit and integration tests
 - Examples
+- Transactions (`begin`/`commit`/`rollback`)
+- Client-side LRU caching with TTL
+- Advanced examples (healthcare, financial)
 
 ### In Progress 🚧
 - gRPC integration (stubs currently)
-- Real FHE implementation (requires `fhe` feature)
 
 ### Future Work 📋
-- Client-side caching
-- Transaction support
-- Advanced examples (healthcare, financial)
+- Real FHE implementation (requires `fhe` feature and a running server with FHE support)
 
 ## Notes
 

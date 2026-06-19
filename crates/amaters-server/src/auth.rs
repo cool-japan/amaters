@@ -12,6 +12,7 @@
 
 use crate::config::{ApiKeySettings, AuthSettings, JwtSettings, MtlsSettings};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use constant_time_eq::constant_time_eq;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -553,16 +554,24 @@ impl ApiKeyValidator {
     }
 
     fn validate_key(&self, key: &str) -> AuthResult<Principal> {
-        let lookup_key = if self.config.hash_keys {
-            Self::hash_key(key)
+        let entry = if self.config.hash_keys {
+            // Compare SHA-256 hashes (fixed 43-char base64 output) via a
+            // normal HashMap lookup — hash comparisons are constant-length
+            // and the SHA-256 pre-image resistance prevents oracle attacks.
+            let hash = Self::hash_key(key);
+            self.keys.get(&hash).ok_or(AuthError::InvalidCredentials)?
         } else {
-            key.to_string()
+            // Raw key path: constant-time byte comparison to prevent timing
+            // side-channel attacks that could reveal the stored key value.
+            // Linear scan ensures the lookup time is independent of where a
+            // matching key appears in the map (O(n) over all stored keys).
+            let key_bytes = key.as_bytes();
+            self.keys
+                .iter()
+                .find(|(stored, _)| constant_time_eq(stored.as_bytes(), key_bytes))
+                .map(|(_, e)| e)
+                .ok_or(AuthError::InvalidCredentials)?
         };
-
-        let entry = self
-            .keys
-            .get(&lookup_key)
-            .ok_or(AuthError::InvalidCredentials)?;
 
         // Create principal
         let mut principal = Principal::new(

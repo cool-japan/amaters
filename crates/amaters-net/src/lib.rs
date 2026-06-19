@@ -36,6 +36,18 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ## Network Architecture
+//!
+//! ```text
+//!  Client → gRPC/tonic → AqlService (GrpcService)
+//!                              │
+//!                       LoadBalancer ──→ [EndpointPool]
+//!                              │
+//!                       RateLimiter / CircuitBreaker
+//!                              │
+//!                       QUIC/mTLS transport
+//! ```
 
 #![allow(dead_code)]
 #![allow(clippy::type_complexity)]
@@ -44,6 +56,7 @@
 pub mod auth;
 pub mod balancer;
 pub mod circuit_breaker;
+pub mod circuit_cache;
 pub mod client;
 pub mod config;
 pub mod convert;
@@ -51,6 +64,8 @@ pub mod error;
 pub mod grpc_service;
 pub mod logging_layer;
 pub mod metrics_layer;
+#[cfg(feature = "telemetry")]
+pub mod otel_propagator;
 pub mod pool;
 pub mod rate_limiter;
 pub mod server;
@@ -96,6 +111,7 @@ pub mod proto {
 }
 
 // Re-exports for convenience
+pub use circuit_cache::{CircuitCache, CircuitCacheConfig, CircuitCacheKey, CircuitCacheStats};
 pub use config::{
     AuthSection, LogVerbosityWire, LoggingSection, MetricsSection, NetConfig, NetSection,
     RateLimitSection, TlsSection,
@@ -110,6 +126,10 @@ pub use server_types::StreamConfig;
 #[cfg(feature = "mtls")]
 pub use tls_acceptor::{LiveTlsAcceptor, TlsCredsRef, build_rustls_config};
 
+// OTel propagator re-exports (feature-gated)
+#[cfg(feature = "telemetry")]
+pub use otel_propagator::{TraceparentExtractor, inject_trace_context};
+
 // mTLS re-exports
 #[cfg(feature = "mtls")]
 pub use mtls::{
@@ -122,6 +142,12 @@ pub use tls::{
     CertificateFormat, CertificateInfo, CertificateLoader, CertificateStore,
     HotReloadableCertificates, PrivateKeyLoader, PrivateKeyType, SelfSignedGenerator,
 };
+
+// QUIC transport (feature-gated)
+#[cfg(feature = "quic")]
+pub mod quic_transport;
+#[cfg(feature = "quic")]
+pub use quic_transport::{QuicClient, QuicClientConfig, QuicServer, QuicServerConfig};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

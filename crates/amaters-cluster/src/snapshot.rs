@@ -415,6 +415,14 @@ impl SnapshotManager {
         self.latest.as_ref()
     }
 
+    /// Path to the on-disk data file for the latest snapshot, if any.
+    /// Use this instead of load_latest() when you only need the path (not the full data).
+    pub(crate) fn latest_data_path(&self) -> Option<std::path::PathBuf> {
+        self.latest
+            .as_ref()
+            .map(|m| self.config.snapshot_dir.join(m.data_filename()))
+    }
+
     /// Get the last included index of the latest snapshot
     pub fn last_included_index(&self) -> LogIndex {
         self.latest

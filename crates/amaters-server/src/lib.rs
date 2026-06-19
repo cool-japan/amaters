@@ -19,9 +19,16 @@ pub mod tls_config;
 pub mod hot_reload;
 pub mod retry;
 
+pub mod admin;
+pub mod cluster_integration;
+pub mod migration;
+pub mod snapshot;
+pub mod version;
+
 // Re-export error types for convenience
 pub use log_rotation::{
     LogGuard, LogRotation, LogRotationConfig, LogRotationError, cleanup_old_logs,
     setup_rotating_logger,
 };
+pub use migration::{Migration, MigrationContext, MigrationPlan, MigrationRegistry};
 pub use server::{ServerError, ServerResult};

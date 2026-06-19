@@ -8,9 +8,9 @@ Rust client SDK for [AmateRS](https://github.com/cool-japan/amaters) — a distr
 
 `amaters-sdk-rust` provides a high-level, ergonomic Rust client library for interacting with AmateRS servers. It covers connection lifecycle management (including health checks and automatic reconnection), a client-side LRU/TTL cache, cursor-based pagination with blake3 integrity verification, flexible sorting, batch operations, and range queries.
 
-- 126 tests
+- 131 tests
 - 191 public API items
-- Version: 0.2.0
+- Version: 0.2.2
 - License: Apache-2.0
 
 ## Features

@@ -5,6 +5,99 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-06-19
+
+### Added
+
+#### Distributed Systems — Sharding (amaters-cluster)
+- **Shard module activated**: `shard.rs` and `partitioner.rs` (~1,805 lines) were compiled but undeclared in `lib.rs`; both are now part of the public API. This brings consistent-hashing, range-based, and hash-based partitioning; `QueryRouter`; k-way `ResultMerger`; `ShardRegistry`; and full shard metadata lifecycle (`ShardSplit`, `ShardMerge`, `ShardTransfer`) into the crate's public surface.
+- **Placement driver** (`placement.rs`): new stateless `PlacementCoordinator` produces deterministic `PlacementPlan`s from a `ShardRegistry` snapshot — split detection (hot shards via `is_hot`), merge detection (cold adjacent same-node pairs), and imbalance-based rebalance transfers. Pure function; no I/O; data-movement execution is a documented boundary.
+- **Placement scheduler** (`placement_scheduler.rs`): background async task (`PlacementScheduler`) that runs on the Raft leader, calls `PlacementCoordinator::plan`, and proposes the resulting `PlacementAction`s as `ClusterCommand` log entries via Raft. Lifecycle managed by `PlacementSchedulerHandle` (stop signal on drop). Attached to `RaftNode` via `attach_placement_scheduler()`.
+- **`ClusterCommand` typed Raft log encoding** (`cluster_command.rs`): 7 variants covering all log entry types — `DataPut`, `DataDelete`, `PlaceSplit`, `PlaceMerge`, `PlaceTransfer`, `MembershipAdd`, `MembershipRemove`. Replaces raw byte encoding with a strongly typed enum; serialised with `postcard` for compact no-std-compatible encoding.
+- **Chunked snapshot streaming**: large snapshots now stream in configurable-size chunks (`snapshot_chunk_threshold_bytes`, `snapshot_chunk_size_bytes`) via the existing `SnapshotStreamer`/`SnapshotReceiver` infrastructure. Per-follower `SnapshotStreamer` instances tracked in `snapshot_streamers` map; auto-cleaned on completion or follower catch-up. Small snapshots remain single-shot.
+
+#### Testing — Chaos Engineering, Load Tests + Benchmarks
+- **Chaos engineering tests** (`amaters-cluster/tests/chaos_tests.rs`): 10 Raft adversarial scenarios exercised fully in-memory (no network). Covers: split vote, dropped message acknowledgements (quorum still achieved via majority path), leader demotion via higher-term heartbeat, term monotonicity across elections, stale heartbeat rejection, 5-node partial partition with 3-node majority, vote idempotency, commit index monotonicity under sustained proposals.
+- **Load tests** (`amaters-server/tests/load_tests.rs`): 5 scenarios all marked `#[ignore]` (manual/CI hardware-specific). Covers: 1M sequential put+get with correctness verification, 100k sequential deletes confirming zero residual state, 32-writer concurrent 320k put-then-spot-check, 32-reader concurrent 320k get (pre-seeded), and 100k mixed 80/20 read/write workload; all assert minimum throughput thresholds.
+- **CircuitCache benchmarks** (added to `amaters-net/benches/net_bench.rs`): hit path, miss path, `get_or_compile` hit + miss, and LRU eviction micro-benchmarks via Criterion.
+
+#### Observability — OpenTelemetry (amaters-core, amaters-net)
+- **`TelemetryConfig` and `TelemetryGuard`** (`telemetry.rs`, feature `telemetry` in amaters-core): structured initialisation of the OpenTelemetry SDK — OTLP gRPC exporter (`opentelemetry-otlp`), `SdkTracerProvider` with batch processor, and tracing-subscriber integration (EnvFilter + fmt layer + OpenTelemetryLayer). `TelemetryGuard` holds the provider and calls `shutdown()` on drop, ensuring in-flight spans are flushed on process exit.
+- **W3C TraceContext propagation for gRPC** (`otel_propagator.rs`, feature `telemetry` in amaters-net): `TraceparentExtractor` reads `traceparent` / `tracestate` from gRPC metadata; `inject_trace_context` writes them into outgoing request metadata; `TraceContextPropagatorLayer` is a Tower `Layer` that wraps incoming RPCs with the extracted span context, enabling end-to-end distributed traces across cluster nodes.
+
+#### Storage — io_uring WAL (amaters-core)
+- **`UringWalWriter`** (`wal_uring.rs`, feature `io-uring` in amaters-core): high-throughput WAL writer using `tokio_uring` for kernel-bypass I/O. Runs on a dedicated OS thread with its own `tokio_uring::start` runtime; communicates with the async caller via a `tokio::sync::mpsc` channel bridge. `UringWalConfig` exposes `ring_size`, `batch_size`, `direct_io`, and `channel_capacity` knobs. The public `UringWalWriter` handle is `Send + Sync + Clone` and can be shared across async tasks without a mutex.
+
+#### Storage — Index Automation (amaters-core)
+- **`IndexExtractor` trait and `IndexedField` type**: pluggable strategy for deriving secondary index entries from `(Key, CipherBlob)` pairs without parsing ciphertext.
+- **`IndexManager::apply_extracted`**: batch diff-based index update from pre-extracted field triples; called automatically by the storage layer.
+- **Automated index maintenance in `LsmTreeStorage` and `MemoryStorage`**: attach an `IndexManager` + `IndexExtractor` via builder methods (`with_index_manager`, `with_index_extractor`, `register_index`). `put`, `delete`, and `atomic_update` now maintain secondary indexes transparently under the `update_lock`; callers no longer need to invoke `update_indexes` manually. Zero overhead when no manager is attached.
+
+#### Network — FHE Circuit Cache (amaters-net)
+- **`CircuitCache`** (`circuit_cache.rs`): thread-safe LRU cache (`HashMap` + `VecDeque` + `parking_lot::Mutex`, clone-able `Arc` handle) for compiled FHE circuits keyed by blake3 hash of the predicate. Stores `Circuit` by clone; configurable capacity (default 256 entries).
+- **FILTER and UPDATE predicate cache integration**: both FHE filter sites in `server.rs` now use `circuit_cache.get_or_compile()`; repeated requests with the same predicate skip `PredicateCompiler::compile` entirely.
+
+#### Python SDK (amaters-sdk-python)
+- **Fully async `pool_stats` and `close`**: both methods now return coroutines via `future_into_py`, removing the last two `block_on` calls. `pool_stats` returns a `PoolStats` object with `.total_connections`, `.active_connections`, `.idle_connections`, `.max_connections` attributes.
+- **`PyPoolStats` type**: new `#[pyclass]` exported as `amaters.PoolStats` with getters for all four connection pool fields.
+- **Python test suite** (`python/tests/`): 116 pytest tests (5 test files) covering `ClientConfig`, `RetryConfig`, `Key`, `BatchResult`, `ScanResult`, all CRUD operations, batch, range query, cursor-based pagination, prefix query, pool stats, lifecycle, edge cases, concurrent access, collection isolation, and 10 Hypothesis property-based tests (get-after-put, delete-consistency, count-vs-keys, contains-vs-get, pagination-completeness, batch-roundtrip, etc.). Tests run without the compiled extension via an in-memory mock client (`conftest.py`); tests gated on the extension use `@pytest.mark.requires_amaters`.
+
+#### CLI — Query Debugger (amaters-cli)
+- **`explain <command>` REPL command**: shows the `QueryPlanner` logical and physical execution plan for a query without sending it to the server. Supported for `get`, `set`, `delete`, and `range` commands. Uses `amaters_core::compute::QueryPlanner` locally; output includes tree-formatted `LogicalPlan` and `PhysicalPlan` with cost estimates.
+
+#### Security — Constant-time Comparisons (amaters-server)
+- **Constant-time API key validation** (`auth.rs`, `middleware.rs`): replaced HashMap `get()` lookups on raw API key strings with a constant-time linear scan using `constant_time_eq` (`constant_time_eq` crate). Eliminates the timing side-channel that allowed an attacker to oracle-check individual characters of a stored API key by measuring response latency. The hashed path (`hash_keys = true`) is unaffected (SHA-256 pre-image resistance already mitigates the oracle attack regardless of comparison method).
+
+#### Cluster — Alert Rules Engine (amaters-cluster)
+- **`RuleEngine`** (`alert_rules.rs`): evaluates `AlertRule`s against incoming `AlertEvent`s, assigns `AlertSeverity` (Info / Warning / Critical), deduplicates firings within a configurable time window (keyed by rule name + event dedup key), and fans out `FiredAlert`s to registered `AlertSink`s.
+- **`AlertSink` trait** + **`LogSink`** built-in: extensible fan-out architecture; `LogSink` emits fired alerts via `tracing` at the appropriate level (error/warn/info). Register additional sinks with `RuleEngine::add_sink`.
+- **`FiredAlert`** struct carries `rule_name`, `severity`, the original `AlertEvent`, and a stable `dedup_key` for downstream idempotent processing.
+
+#### Storage — Versioned Document Migration Framework (amaters-server)
+- **`MigrationRegistry`** (`migration.rs`): register version-to-version `Migration` steps; `plan(from, to)` computes the shortest migration path via BFS across the registered step graph, returning a `MigrationPlan` with zero-copy step references.
+- **`Migration` trait**: `from_version() -> (u64, u64, u64)`, `to_version()`, `description()`, `migrate(&mut MigrationContext)` — implementors declare their source/target semantic versions and transform a `MigrationContext` in-place.
+- **`MigrationContext`**: mutable wrapper around a `serde_json::Value` document exposing `get`, `set`, `remove`, and `into_doc` — passed through each step in the plan so migrations compose cleanly without copying the document.
+
+### Changed
+- `amaters-sdk-rust/TODO.md`: marked pagination (`PaginationConfig`/`PaginatedResult`/cursor-based) and ordering (`SortOrder`/`SortField`/`SortConfig`) as done — client-side implementations were already complete.
+- `amaters-sdk-python/TODO.md`: marked async client item as done.
+- Corrected root `TODO.md` stale "COMPLETE" claims for consistent-hashing/shard-aware routing (sharding code was present but orphaned).
+- **`wal.rs` refactored**: WAL tests extracted to `wal_tests.rs` (included via `#[path]`); `wal.rs` now strictly under 2000 lines.
+- **`server.rs` refactored** (amaters-net): server tests extracted to `server_tests.rs`; `server.rs` reduced from ~1,941 to 1,195 lines.
+- **`tls.rs` refactored** (amaters-net): TLS + crypto tests extracted to `tls_tests.rs`; `tls.rs` reduced from 1,954 to 1,183 lines.
+- **`health.rs` refactored** (amaters-server): health endpoint tests extracted to `health_tests.rs`; `health.rs` reduced from 1,973 to 1,196 lines.
+- **`optimizer.rs` refactored** (amaters-core): optimizer tests extracted to `optimizer_tests.rs`; `optimizer.rs` reduced from 1,977 to 1,174 lines.
+- **`node_tests.rs` split**: advanced integration tests moved to `node_tests_advanced.rs` (1,052 lines); snapshot-specific tests moved to `node_snapshot_tests.rs` (237 lines). All files now comply with the 2000-line policy.
+- Root `TODO.md` corrected: marked integration test suite (318+ cross-crate tests), hot-reload support, and backup/restore CLI as done — all were fully implemented but incorrectly listed as pending.
+- **`tokio-uring` is now a conditional dependency** in `amaters-core`: gated on `cfg(target_os = "linux")` via `[target.'cfg(target_os = "linux")'.dependencies]` so that the crate compiles on macOS and Windows without the `io-uring` feature flag needing to be disabled explicitly.
+- `tokio` updated from 1.50 to 1.52.
+- `dashmap` updated from 6.1 to 6.2.
+- `rayon` updated from 1.11 to 1.12.
+- `serial_test` updated from 3.2 to 3.5.
+- `similar` updated from 3.1.0 to 3.1.1.
+
+### Security
+- **pyo3 upgraded from 0.28.3 to 0.29**: fixes RUSTSEC-2026-0176 (out-of-bounds read in `nth`/`nth_back` for `PyList`/`PyTuple` iterators) and RUSTSEC-2026-0177 (missing `Sync` bound on `PyCFunction::new_closure` closures) in `amaters-sdk-python`. Also upgrades `pyo3-async-runtimes` and `pyo3-build-config` to 0.29.
+
+### Tests
+- Rust: **2,224 tests run: 2,224 passed, 29 skipped, 0 failed** (full workspace); 275 amaters-cli, 421 amaters-cluster (incl. 10 chaos), 412 amaters-core, 252 amaters-net, 193+ amaters-server.
+- **Chaos engineering tests** (`amaters-cluster/tests/chaos_tests.rs`): 10 in-memory Raft adversarial tests — split vote, dropped messages, leader demotion, term monotonicity, stale heartbeat rejection, multiple-proposal index ordering, 5-node partial partition, vote idempotency, follower lower-term rejection, commit index monotonicity.
+- **Python SDK tests**: 116 pytest tests across 5 test files (mock-backed, no extension needed). Includes 10 Hypothesis property-based tests (`test_properties.py`). Runs via `python3 -m pytest python/tests/` from the SDK root or within the tests directory (`pytest.ini` has `pythonpath = .`).
+- **Load tests** (`amaters-server/tests/load_tests.rs`): 5 `#[ignore]` tests for 1M+ ops; run manually with `--include-ignored`.
+- New Rust tests: 3 snapshot-streaming tests (`node_snapshot_tests.rs`), ~15 placement driver tests, ~45 re-activated shard/partitioner tests, 11 secondary-index automation tests (core), 12 circuit-cache tests (net), 6 EXPLAIN command tests (CLI).
+- **Property-based tests (proptest)**: 5 LSM-Tree invariant tests (`lsm_storage.rs`), 5 shard registry invariant tests (`shard.rs`), 5 placement coordinator invariant tests (`placement.rs`) — 15 proptest tests total.
+- **Fixed stale API references** in `amaters-cluster/src/integration_tests.rs`: `FencingToken.epoch` → `token.term()`, `FencingToken` ordering → `t2 > t1`, `RequestVoteResponse::new(term, granted, _)` → `::new(term, granted)`.
+
+### Fixed
+- **`KeyRange::midpoint()` off-by-one for unequal-length keys** (`amaters-cluster/src/shard.rs`): the previous implementation used `min(start.len, end.len)` bytes, causing midpoint("y", "yyyyyy") to produce "z" (which is > "yyyyyy"). Fixed by padding both keys to `max(start.len, end.len)` with trailing zero bytes and performing correct big-endian averaging with carry propagation. The midpoint now satisfies `start ≤ mid < end` for all valid key ranges including those with different-length keys.
+- **Infinite loop in `detect_rebalance()`** (`amaters-cluster/src/placement.rs`): when `n_shards < n_nodes`, the greedy transfer loop oscillated infinitely (e.g. 1 shard on 2 nodes — moving to B made B over-loaded, then back to A, then back to B…). Fixed by (a) adding an early exit when the receiving node would itself become over-loaded after the transfer, and (b) bounding the loop to `n_shards + 1` iterations as a safety guard. This also fixed the placement proptest timeout: all 5 placement propts now complete in < 1ms. Proptest ranges also narrowed to exercise hot/cold/rebalance thresholds without requiring massive synthetic data.
+- **Python SDK test discovery from parent directory** (`amaters-sdk-python`): mock classes moved from `conftest.py` to `mocks.py` (dedicated module); test files now import `from mocks import MockClient, ...`; `pytest.ini` gains `pythonpath = .` so `mocks` is importable when pytest is run from outside the tests directory. All 116 tests run from both `python/tests/` and the SDK root.
+
+### Added
+- **Criterion benchmarks for amaters-cluster** (`crates/amaters-cluster/benches/cluster_bench.rs`): 9 benchmark groups covering Raft election latency, proposal throughput (16/128/1024 byte payloads), AppendEntries follower processing (1/10/100 entries), full replication round-trip, placement coordinator planning cost (8/32/128 shards), ShardRegistry lookup/register/get-by-node, RequestVote processing, and heartbeat processing.
+
+---
+
 ## [0.2.1] - 2026-05-09
 
 ### Fixed
@@ -374,5 +467,7 @@ This is the first release (0.1.0), no migration needed.
 
 No unreleased changes yet.
 
+[0.2.2]: https://github.com/cool-japan/amaters/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/cool-japan/amaters/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cool-japan/amaters/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cool-japan/amaters/releases/tag/v0.1.0

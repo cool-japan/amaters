@@ -14,7 +14,9 @@ use std::path::Path;
 #[derive(Clone)]
 pub struct FheKeys {
     #[cfg(feature = "fhe")]
-    _keys: tfhe::ClientKey,
+    client_key: tfhe::ClientKey,
+    #[cfg(feature = "fhe")]
+    server_key: tfhe::ServerKey,
     #[cfg(not(feature = "fhe"))]
     _placeholder: (),
 }
@@ -28,13 +30,37 @@ impl FheKeys {
         #[cfg(feature = "fhe")]
         {
             let config = tfhe::ConfigBuilder::default().build();
-            let client_key = tfhe::ClientKey::generate(config);
-            Ok(Self { _keys: client_key })
+            let (client_key, server_key) = tfhe::generate_keys(config);
+            Ok(Self {
+                client_key,
+                server_key,
+            })
         }
         #[cfg(not(feature = "fhe"))]
         {
             Ok(Self { _placeholder: () })
         }
+    }
+
+    /// Get reference to the client key
+    #[cfg(feature = "fhe")]
+    pub fn client_key(&self) -> &tfhe::ClientKey {
+        &self.client_key
+    }
+
+    /// Get reference to the server key
+    #[cfg(feature = "fhe")]
+    pub fn server_key(&self) -> &tfhe::ServerKey {
+        &self.server_key
+    }
+
+    /// Set this instance's server key as the global TFHE server key.
+    ///
+    /// Must be called before performing any FHE arithmetic, comparison, or boolean operations.
+    /// TFHE operations require a thread-local server key to be set.
+    #[cfg(feature = "fhe")]
+    pub fn set_as_global_server_key(&self) {
+        tfhe::set_server_key(self.server_key.clone());
     }
 
     /// Load keys from a file
@@ -48,9 +74,13 @@ impl FheKeys {
                 .map_err(|e| SdkError::Fhe(format!("failed to read key file: {}", e)))?;
             #[cfg(feature = "serialization")]
             {
-                let client_key: tfhe::ClientKey = oxicode::serde::decode_serde(&bytes)
-                    .map_err(|e| SdkError::Fhe(format!("failed to deserialize keys: {}", e)))?;
-                Ok(Self { _keys: client_key })
+                let (client_key, server_key): (tfhe::ClientKey, tfhe::ServerKey) =
+                    oxicode::serde::decode_serde(&bytes)
+                        .map_err(|e| SdkError::Fhe(format!("failed to deserialize keys: {}", e)))?;
+                Ok(Self {
+                    client_key,
+                    server_key,
+                })
             }
             #[cfg(not(feature = "serialization"))]
             {
@@ -76,7 +106,7 @@ impl FheKeys {
         {
             #[cfg(feature = "serialization")]
             {
-                let bytes = oxicode::serde::encode_serde(&self._keys)
+                let bytes = oxicode::serde::encode_serde(&(&self.client_key, &self.server_key))
                     .map_err(|e| SdkError::Fhe(format!("failed to serialize keys: {}", e)))?;
                 std::fs::write(path.as_ref(), &bytes)
                     .map_err(|e| SdkError::Fhe(format!("failed to write key file: {}", e)))?;
@@ -102,7 +132,7 @@ impl FheKeys {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         #[cfg(feature = "fhe")]
         {
-            oxicode::serde::encode_serde(&self._keys).map_err(|e| {
+            oxicode::serde::encode_serde(&(&self.client_key, &self.server_key)).map_err(|e| {
                 SdkError::Serialization(format!("failed to serialize FHE keys: {}", e))
             })
         }
@@ -117,10 +147,14 @@ impl FheKeys {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         #[cfg(feature = "fhe")]
         {
-            let client_key: tfhe::ClientKey = oxicode::serde::decode_serde(bytes).map_err(|e| {
-                SdkError::Serialization(format!("failed to deserialize FHE keys: {}", e))
-            })?;
-            Ok(Self { _keys: client_key })
+            let (client_key, server_key): (tfhe::ClientKey, tfhe::ServerKey) =
+                oxicode::serde::decode_serde(bytes).map_err(|e| {
+                    SdkError::Serialization(format!("failed to deserialize FHE keys: {}", e))
+                })?;
+            Ok(Self {
+                client_key,
+                server_key,
+            })
         }
         #[cfg(not(feature = "fhe"))]
         {
@@ -166,8 +200,9 @@ impl FheEncryptor {
             // Encrypt each byte as an FheUint8 and collect serialized ciphertexts
             let mut encrypted_parts: Vec<Vec<u8>> = Vec::with_capacity(plaintext.len());
             for &byte in plaintext {
-                let encrypted: tfhe::FheUint8 = tfhe::FheUint8::try_encrypt(byte, &self.keys._keys)
-                    .map_err(|e| SdkError::Fhe(format!("failed to encrypt byte: {}", e)))?;
+                let encrypted: tfhe::FheUint8 =
+                    tfhe::FheUint8::try_encrypt(byte, self.keys.client_key())
+                        .map_err(|e| SdkError::Fhe(format!("failed to encrypt byte: {}", e)))?;
                 // Serialize each encrypted value
                 #[cfg(feature = "serialization")]
                 {
@@ -253,7 +288,7 @@ impl FheEncryptor {
                     .map_err(|e| {
                         SdkError::Fhe(format!("failed to deserialize encrypted byte: {}", e))
                     })?;
-                    let byte: u8 = encrypted.decrypt(&self.keys._keys);
+                    let byte: u8 = encrypted.decrypt(self.keys.client_key());
                     plaintext.push(byte);
                 }
                 #[cfg(not(feature = "serialization"))]

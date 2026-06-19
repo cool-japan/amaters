@@ -249,6 +249,10 @@ pub struct RaftConfig {
     pub wal_dir: Option<PathBuf>,
     /// Whether to fsync after every persistent write (default: true)
     pub sync_on_write: bool,
+    /// Max snapshot size in bytes before switching to chunked streaming. Default: 4 MiB.
+    pub snapshot_chunk_threshold_bytes: u64,
+    /// Chunk size in bytes for large snapshot streaming. Default: 1 MiB.
+    pub snapshot_chunk_size_bytes: usize,
 }
 
 impl RaftConfig {
@@ -267,6 +271,8 @@ impl RaftConfig {
             persistence_dir: None,
             wal_dir: None,
             sync_on_write: true,
+            snapshot_chunk_threshold_bytes: 4 * 1024 * 1024,
+            snapshot_chunk_size_bytes: 1024 * 1024,
         }
     }
 

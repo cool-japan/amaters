@@ -279,6 +279,9 @@ pub fn create_test_config(temp_dir: &Path, port: u32) -> ServerConfig {
             audit_enabled: false,
             audit_log_path: None,
         },
+        resource_limits: Default::default(),
+        circuit_cache: Default::default(),
+        timeouts: Default::default(),
     }
 }
 

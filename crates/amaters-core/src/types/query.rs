@@ -11,6 +11,17 @@ use super::{CipherBlob, Key};
 /// server-side predicate evaluation without FHE machinery.
 const PLAINTEXT_MAX_BYTES: usize = 64;
 
+/// Join type for Query::Join
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinType {
+    /// Return rows matching both sides
+    Inner,
+    /// Return all left rows, null-fill non-matching right
+    Left,
+    /// Return all right rows, null-fill non-matching left
+    Right,
+}
+
 /// Top-level query type
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
@@ -40,6 +51,21 @@ pub enum Query {
         collection: String,
         start: Key,
         end: Key,
+    },
+    /// Join two collections on a predicate
+    Join {
+        /// Left-hand collection name
+        left_collection: String,
+        /// Right-hand collection name
+        right_collection: String,
+        /// Join condition evaluated over encrypted data
+        on: Predicate,
+        /// Type of join
+        join_type: JoinType,
+        /// Optional row limit on the left input
+        left_limit: Option<usize>,
+        /// Optional row limit on the right input
+        right_limit: Option<usize>,
     },
 }
 

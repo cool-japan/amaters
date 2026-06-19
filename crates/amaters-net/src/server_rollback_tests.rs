@@ -25,7 +25,7 @@ async fn run_batch(
     service: &AqlServiceImpl<MemoryStorage>,
     queries: Vec<Query>,
 ) -> aql::BatchResponse {
-    let proto_queries: Vec<_> = queries.iter().map(|q| to_proto(q)).collect();
+    let proto_queries: Vec<_> = queries.iter().map(to_proto).collect();
     let request = aql::BatchRequest {
         queries: proto_queries,
         request_id: Some("test".to_string()),

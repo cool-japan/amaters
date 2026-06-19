@@ -324,25 +324,14 @@ pub fn resolve_key_name(explicit: Option<&str>, config: &Config) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use tempfile::TempDir;
 
     #[test]
     fn test_key_manager_creation() -> Result<()> {
-        let temp_dir = env::temp_dir().join("amaters_cli_test_keys");
-
-        // Clean up if exists
-        let _ = fs::remove_dir_all(&temp_dir);
-
-        // Should create directory
-        let keys_dir = temp_dir.clone();
-        fs::create_dir_all(&keys_dir)?;
-
+        let temp_dir = TempDir::new()?;
+        let keys_dir = temp_dir.path().to_path_buf();
         let manager = KeyManager { keys_dir };
         assert!(manager.keys_dir.exists());
-
-        // Clean up
-        fs::remove_dir_all(&temp_dir)?;
-
         Ok(())
     }
 
@@ -368,18 +357,12 @@ mod tests {
 
     #[test]
     fn test_list_empty_keys() -> Result<()> {
-        let temp_dir = env::temp_dir().join("amaters_cli_test_empty");
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir)?;
-
+        let temp_dir = TempDir::new()?;
         let manager = KeyManager {
-            keys_dir: temp_dir.clone(),
+            keys_dir: temp_dir.path().to_path_buf(),
         };
         let keys = manager.list()?;
-
         assert_eq!(keys.len(), 0);
-
-        fs::remove_dir_all(&temp_dir)?;
         Ok(())
     }
 
@@ -387,19 +370,17 @@ mod tests {
     // Item 4: Default key tests
     // -----------------------------------------------------------------------
 
-    fn make_temp_config(suffix: &str) -> (Config, std::path::PathBuf) {
-        let dir = env::temp_dir().join(format!("amaters_defkey_{}", suffix));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("config.toml");
+    fn make_temp_config() -> Result<(Config, std::path::PathBuf, TempDir)> {
+        let dir = TempDir::new()?;
+        let path = dir.path().join("config.toml");
         let config = Config::default();
-        config.save_to(&path).expect("save default config");
-        (config, path)
+        config.save_to(&path)?;
+        Ok((config, path, dir))
     }
 
     #[test]
     fn test_default_key_set_persists_to_config() -> Result<()> {
-        let (mut config, path) = make_temp_config("set_persists");
+        let (mut config, path, _dir) = make_temp_config()?;
 
         handle_key_default(&mut config, &path, Some("my-key".to_string()), false, false)?;
 
@@ -407,13 +388,12 @@ mod tests {
         let loaded = Config::load_from(&path)?;
         assert_eq!(loaded.default_key, Some("my-key".to_string()));
 
-        let _ = fs::remove_dir_all(path.parent().expect("parent"));
         Ok(())
     }
 
     #[test]
     fn test_default_key_clear_removes_setting() -> Result<()> {
-        let (mut config, path) = make_temp_config("clear_removes");
+        let (mut config, path, _dir) = make_temp_config()?;
 
         // First set a default key
         handle_key_default(&mut config, &path, Some("my-key".to_string()), false, false)?;
@@ -427,31 +407,28 @@ mod tests {
         let loaded2 = Config::load_from(&path)?;
         assert_eq!(loaded2.default_key, None);
 
-        let _ = fs::remove_dir_all(path.parent().expect("parent"));
         Ok(())
     }
 
     #[test]
     fn test_default_key_show_displays_current() -> Result<()> {
-        let (mut config, path) = make_temp_config("show_displays");
+        let (mut config, path, _dir) = make_temp_config()?;
         config.default_key = Some("visible-key".to_string());
         config.save_to(&path)?;
 
         // show=true should succeed without error
         handle_key_default(&mut config, &path, None, false, true)?;
 
-        let _ = fs::remove_dir_all(path.parent().expect("parent"));
         Ok(())
     }
 
     #[test]
     fn test_default_key_show_none_when_unset() -> Result<()> {
-        let (mut config, path) = make_temp_config("show_none");
+        let (mut config, path, _dir) = make_temp_config()?;
         // default_key is None by default
 
         handle_key_default(&mut config, &path, None, false, true)?;
 
-        let _ = fs::remove_dir_all(path.parent().expect("parent"));
         Ok(())
     }
 
@@ -497,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_default_key_atomic_write_no_partial_file() -> Result<()> {
-        let (mut config, path) = make_temp_config("atomic_write");
+        let (mut config, path, _dir) = make_temp_config()?;
 
         handle_key_default(
             &mut config,
@@ -519,7 +496,6 @@ mod tests {
         let loaded = Config::load_from(&path)?;
         assert_eq!(loaded.default_key, Some("atomic-key".to_string()));
 
-        let _ = fs::remove_dir_all(path.parent().expect("parent"));
         Ok(())
     }
 }

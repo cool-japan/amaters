@@ -4,13 +4,13 @@ Consensus layer for AmateRS (Ukehi - The Sacred Pledge)
 
 [![Alpha](https://img.shields.io/badge/status-alpha-orange)](https://github.com/cool-japan/amaters)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
-[![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-blue)](Cargo.toml)
+[![Version: 0.2.2](https://img.shields.io/badge/version-0.2.2-blue)](Cargo.toml)
 
 ## Overview
 
 `amaters-cluster` implements distributed consensus and cluster management for AmateRS using the **Ukehi** component. It provides a complete Raft consensus implementation with joint consensus membership changes, a batch-apply state machine with snapshotting, consistent hashing for data partitioning, and full node lifecycle management.
 
-**Status**: Alpha — 257 tests, 245 public items.
+**Status**: Alpha — 440 tests, ~495 public items.
 
 ## Implemented Features
 
@@ -35,12 +35,27 @@ A complete, from-scratch Raft consensus implementation:
 - Minimal key movement when adding or removing nodes
 - Configurable replication factor
 
+### Shard Module (Placement and Partitioning)
+
+- `shard.rs` and `partitioner.rs` modules activated for production use
+- `PlacementCoordinator` — centralized shard placement planning with imbalance detection
+- `PlacementScheduler` — background task driving periodic placement cycles with configurable `imbalance_threshold`
+- `RangePartitioner` — key-range to shard mapping via sorted `BTreeMap`; complement to the consistent-hash ring
+- `ShardRegistry::execute_split` / `execute_merge` / `execute_transfer` — atomic shard lifecycle transitions
+- `ClusterCommand` typed encoding for Raft log entries (replaces raw bytes)
+
 ### Snapshot Management
 
 - Snapshot creation triggered by configurable log size thresholds
 - Snapshot storage and retrieval
 - Snapshot transfer to joining or lagging followers
 - Log truncation after successful snapshot
+
+### Chunked Snapshot Streaming
+
+- Streaming snapshot transfer to lagging followers without buffering entire snapshots in RAM
+- Per-peer `SnapshotStreamReceiver` stored in a `HashMap` keyed by `NodeId`
+- Automatic receiver cleanup on node restart or disconnection via `become_follower` / `step_down`
 
 ### Write-Ahead Log (WAL v2)
 
@@ -64,6 +79,13 @@ A complete, from-scratch Raft consensus implementation:
 - Dynamic membership changes via joint consensus
 - Add and remove peers without cluster downtime
 - Membership configuration persisted in the Raft log
+
+### Alert Rules Engine
+
+- `RuleEngine` — evaluates named alert rules against live cluster metrics at configurable intervals
+- `AlertSink` trait — pluggable destination for fired alerts (log, webhook, channel)
+- `FiredAlert` — captures rule name, severity, message, and timestamp for each triggered rule
+- Integrated with `AlertManager` fan-out hub for leader-loss, quorum-loss, and slow-replication events
 
 ## Architecture
 
@@ -155,7 +177,7 @@ let responsible_node = ring.get_node(b"my-document-key")?;
 ## Testing
 
 ```bash
-# Run all tests (257 total)
+# Run all tests (440 total)
 cargo nextest run --all-features
 
 # Unit tests only

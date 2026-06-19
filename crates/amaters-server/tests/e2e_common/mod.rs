@@ -282,6 +282,9 @@ pub fn create_e2e_server_config(temp_dir: &Path, port: u32, engine: &str) -> Ser
             audit_enabled: false,
             audit_log_path: None,
         },
+        resource_limits: Default::default(),
+        circuit_cache: Default::default(),
+        timeouts: Default::default(),
     }
 }
 

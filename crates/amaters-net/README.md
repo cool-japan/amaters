@@ -4,13 +4,13 @@ Network layer for AmateRS (Musubi - The Knot)
 
 [![Alpha](https://img.shields.io/badge/status-alpha-orange)](https://github.com/cool-japan/amaters)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
-[![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-blue)](Cargo.toml)
+[![Version: 0.2.2](https://img.shields.io/badge/version-0.2.2-blue)](Cargo.toml)
 
 ## Overview
 
 `amaters-net` provides the networking infrastructure for AmateRS, implementing the **Musubi** component. It handles client-server communication using gRPC (tonic-based) with mutual TLS (mTLS) for secure, authenticated data exchange. Security is implemented entirely in pure Rust with no C or Fortran dependencies.
 
-**Status**: Alpha — 266 tests, 358 public items.
+**Status**: Alpha — 361 tests, ~467 public items.
 
 ## Implemented Features
 
@@ -85,6 +85,18 @@ Two rate limiting algorithms are implemented:
 |---|---|
 | Token bucket | Smooth rate limiting with burst allowance |
 | Sliding window | Precise rate limiting over a rolling time window |
+
+### FHE Circuit Cache
+
+- `CircuitCache` — LRU cache for compiled FHE circuits, reducing redundant recompilation overhead
+- Configurable capacity with eviction on overflow
+- Thread-safe via `Arc<Mutex<...>>` internals
+
+### OpenTelemetry W3C TraceContext Propagation
+
+- W3C TraceContext header propagation (`traceparent` / `tracestate`) on all gRPC requests (feature `telemetry`)
+- Outbound requests inject trace context; inbound requests extract and continue the span
+- Interoperable with any W3C-compliant distributed tracing backend
 
 ## Architecture
 
@@ -181,7 +193,7 @@ Both PKCS#8 and legacy encrypted PEM key formats are supported for loading priva
 ## Testing
 
 ```bash
-# Run all tests (266 total)
+# Run all tests (361 total)
 cargo nextest run --all-features
 
 # Unit tests only

@@ -239,3 +239,29 @@ impl PyScanResult {
         )
     }
 }
+
+/// Connection pool statistics
+#[pyclass(name = "PoolStats")]
+pub(crate) struct PyPoolStats {
+    #[pyo3(get)]
+    pub total_connections: usize,
+    #[pyo3(get)]
+    pub active_connections: usize,
+    #[pyo3(get)]
+    pub idle_connections: usize,
+    #[pyo3(get)]
+    pub max_connections: usize,
+}
+
+#[pymethods]
+impl PyPoolStats {
+    pub fn __repr__(&self) -> String {
+        format!(
+            "PoolStats(total={}, active={}, idle={}, max={})",
+            self.total_connections,
+            self.active_connections,
+            self.idle_connections,
+            self.max_connections
+        )
+    }
+}

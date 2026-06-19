@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -24,16 +24,16 @@ documentation = "https://docs.rs/amaters"
 
 [workspace.dependencies]
 # Internal crates
-amaters-core = { path = "crates/amaters-core", version = "0.2.1" }
-amaters-net = { path = "crates/amaters-net", version = "0.2.1" }
-amaters-cluster = { path = "crates/amaters-cluster", version = "0.2.1" }
-amaters-sdk-rust = { path = "crates/amaters-sdk-rust", version = "0.2.1" }
+amaters-core = { path = "crates/amaters-core", version = "0.2.2" }
+amaters-net = { path = "crates/amaters-net", version = "0.2.2" }
+amaters-cluster = { path = "crates/amaters-cluster", version = "0.2.2" }
+amaters-sdk-rust = { path = "crates/amaters-sdk-rust", version = "0.2.2" }
 
 # FHE and Cryptography
 tfhe = { version = "1.5", default-features = false }
 
 # Async runtime and I/O
-tokio = { version = "1.50", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 tokio-uring = "0.5"  # Linux only
 async-trait = "0.1"
 futures = "0.3"
@@ -43,9 +43,10 @@ tokio-stream = "0.1"
 
 # Serialization
 rkyv = "0.8"
-oxicode = { version = "0.2.3", features = ["alloc", "serde"] }  # COOLJAPAN policy
+oxicode = { version = "0.2.4", features = ["alloc", "serde"] }  # COOLJAPAN policy
 
 # Networking
+bytes = { version = "1" }
 tonic = { version = "0.14", features = ["gzip", "transport", "tls-ring", "tls-webpki-roots"] }
 tonic-build = "0.14"
 tonic-prost-build = "0.14"
@@ -73,11 +74,11 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Collections and data structures
-dashmap = "6.1"  # Concurrent HashMap
+dashmap = "6.2"  # Concurrent HashMap
 parking_lot = "0.12"  # Better Mutex/RwLock
 
 # Parallelism
-rayon = "1.11"
+rayon = "1.12"
 crossbeam = "0.8"
 num_cpus = "1.17"
 
@@ -85,6 +86,11 @@ num_cpus = "1.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
+opentelemetry-semantic-conventions = "0.32"
+tracing-opentelemetry = "0.33"
 
 # Configuration
 serde = { version = "1.0", features = ["derive"] }
@@ -100,11 +106,13 @@ serde_yaml = "0.9"
 
 # Utilities
 bytemuck = { version = "1.25", features = ["derive"] }
+constant_time_eq = "0.4"
 memmap2 = "0.9"
 crc32fast = "1.5"
-oxiarc-lz4 = "0.2"
-oxiarc-deflate = "0.2"
+oxiarc-lz4 = "0.3.3"
+oxiarc-deflate = "0.3.3"
 blake3 = "1.8"  # Fast hashing
+siphasher = "0.3"  # SipHash-1-3 for encrypted index hashing
 aes-gcm = "0.10"  # AES-256-GCM authenticated encryption (pure Rust)
 hmac = "0.12"     # HMAC construction (pure Rust)
 sha2 = "0.10"     # SHA-2 hash family (pure Rust)
@@ -119,14 +127,14 @@ quickcheck = "1.1"
 quickcheck_macros = "1.2"
 approx = "0.5"
 tracing-test = "0.2"
-serial_test = "3.2"
+serial_test = "3.5"
 
 # Hot reload and atomic pointer swap
 arc-swap = "1.9"
 notify = "8.2"   # Cross-platform filesystem notifications (pure Rust on Linux)
 
 # Diff
-similar = "3.1.0"
+similar = "3.1.1"
 
 # Benchmarking
 criterion = { version = "0.8", features = ["html_reports"] }

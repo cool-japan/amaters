@@ -31,7 +31,10 @@ pub enum ShardState {
 impl ShardState {
     /// Check if the shard can serve read requests
     pub fn can_read(&self) -> bool {
-        matches!(self, ShardState::Active | ShardState::Splitting | ShardState::Transferring)
+        matches!(
+            self,
+            ShardState::Active | ShardState::Splitting | ShardState::Transferring
+        )
     }
 
     /// Check if the shard can serve write requests
@@ -81,30 +84,48 @@ impl KeyRange {
         self.start < other.end && other.start < self.end
     }
 
-    /// Calculate the midpoint key for splitting
+    /// Calculate the midpoint key for splitting.
+    ///
+    /// Returns a key M such that `self.start <= M < self.end`.
+    ///
+    /// Both keys are padded to the same length with trailing zero bytes and
+    /// treated as big-endian integers, so keys of different lengths are handled
+    /// correctly (e.g. midpoint("y", "yyyyyy") yields [0x79, 0x3C, …], not "z").
     pub fn midpoint(&self) -> Key {
-        // Simple midpoint calculation based on byte comparison
         let start_bytes = self.start.as_bytes();
         let end_bytes = self.end.as_bytes();
+        let max_len = start_bytes.len().max(end_bytes.len());
 
-        let min_len = start_bytes.len().min(end_bytes.len());
-        let mut mid_bytes = Vec::with_capacity(min_len);
+        let get_byte = |v: &[u8], i: usize| -> u16 { v.get(i).copied().unwrap_or(0) as u16 };
 
-        let mut carry = false;
-        for i in 0..min_len {
-            let avg = (start_bytes[i] as u16 + end_bytes[i] as u16 + carry as u16) / 2;
-            mid_bytes.push(avg as u8);
-            carry = (start_bytes[i] as u16 + end_bytes[i] as u16 + carry as u16) % 2 == 1;
+        // Step 1: byte-wise sum with right-to-left carry propagation.
+        let mut sum: Vec<u16> = (0..max_len)
+            .map(|i| get_byte(start_bytes, i) + get_byte(end_bytes, i))
+            .collect();
+        let mut carry: u16 = 0;
+        for b in sum.iter_mut().rev() {
+            let v = *b + carry;
+            *b = v & 0xFF;
+            carry = v >> 8; // 0 or 1
         }
+        // carry: 0 or 1 — overflow bit above position 0
 
-        // Ensure midpoint is different from start
-        if mid_bytes == start_bytes[..min_len] {
-            if let Some(last) = mid_bytes.last_mut() {
-                *last = last.saturating_add(1);
-            }
+        // Step 2: divide (carry || sum) by 2 via left-to-right bit-shift.
+        let mut mid: Vec<u8> = Vec::with_capacity(max_len);
+        let mut half_carry = carry; // the leading overflow bit
+        for b in &sum {
+            let val = half_carry * 256 + b;
+            mid.push((val / 2) as u8);
+            half_carry = val % 2;
         }
+        // Discard the trailing remainder bit — it truncates (floor), keeping mid < end.
 
-        Key::from_slice(&mid_bytes)
+        // Note: we intentionally do NOT strip trailing zeros here. Stripping could
+        // make `mid` lexicographically shorter than `start`, e.g. when both keys
+        // begin with 0x00 bytes. The extra trailing zeros are harmless — they just
+        // extend the resulting key to the same length as the longer of the two inputs.
+
+        Key::from_slice(&mid)
     }
 
     /// Create a range that covers all possible keys
@@ -259,20 +280,12 @@ impl ShardSplit {
     ) -> RaftResult<(ShardMetadata, ShardMetadata)> {
         // Create left shard (start to split_key)
         let left_range = KeyRange::new(source.range.start.clone(), self.split_key.clone())?;
-        let mut left_shard = ShardMetadata::new(
-            self.left_shard_id,
-            left_range,
-            source.node_id,
-        );
+        let mut left_shard = ShardMetadata::new(self.left_shard_id, left_range, source.node_id);
         left_shard.replicas = source.replicas.clone();
 
         // Create right shard (split_key to end)
         let right_range = KeyRange::new(self.split_key.clone(), source.range.end.clone())?;
-        let mut right_shard = ShardMetadata::new(
-            self.right_shard_id,
-            right_range,
-            source.node_id,
-        );
+        let mut right_shard = ShardMetadata::new(self.right_shard_id, right_range, source.node_id);
         right_shard.replicas = source.replicas.clone();
 
         // Estimate stats (simple equal split assumption)
@@ -300,11 +313,7 @@ pub struct ShardMerge {
 
 impl ShardMerge {
     /// Create a new shard merge descriptor
-    pub fn new(
-        left_shard_id: ShardId,
-        right_shard_id: ShardId,
-        target_shard_id: ShardId,
-    ) -> Self {
+    pub fn new(left_shard_id: ShardId, right_shard_id: ShardId, target_shard_id: ShardId) -> Self {
         Self {
             left_shard_id,
             right_shard_id,
@@ -346,16 +355,9 @@ impl ShardMerge {
     ) -> RaftResult<ShardMetadata> {
         self.validate(left, right)?;
 
-        let merged_range = KeyRange::new(
-            left.range.start.clone(),
-            right.range.end.clone(),
-        )?;
+        let merged_range = KeyRange::new(left.range.start.clone(), right.range.end.clone())?;
 
-        let mut merged = ShardMetadata::new(
-            self.target_shard_id,
-            merged_range,
-            left.node_id,
-        );
+        let mut merged = ShardMetadata::new(self.target_shard_id, merged_range, left.node_id);
 
         // Combine statistics
         merged.estimated_keys = left.estimated_keys + right.estimated_keys;
@@ -407,9 +409,8 @@ impl ShardTransfer {
             if let Ok(elapsed) = self.initiated_at.elapsed() {
                 let total_time = elapsed.as_secs_f64() / progress;
                 let remaining_time = total_time * (1.0 - progress);
-                self.estimated_completion = Some(
-                    SystemTime::now() + Duration::from_secs_f64(remaining_time)
-                );
+                self.estimated_completion =
+                    Some(SystemTime::now() + Duration::from_secs_f64(remaining_time));
             }
         }
     }
@@ -481,9 +482,11 @@ impl ShardRegistry {
     /// Remove a shard
     pub fn remove(&self, shard_id: ShardId) -> RaftResult<()> {
         let mut shards = self.shards.write();
-        shards.remove(&shard_id).ok_or_else(|| RaftError::ConfigError {
-            message: format!("Shard {} not found", shard_id),
-        })?;
+        shards
+            .remove(&shard_id)
+            .ok_or_else(|| RaftError::ConfigError {
+                message: format!("Shard {} not found", shard_id),
+            })?;
         Ok(())
     }
 
@@ -515,11 +518,294 @@ impl ShardRegistry {
     pub fn count(&self) -> usize {
         self.shards.read().len()
     }
+
+    /// Atomic split: parent Active→removed, two children inserted as Active.
+    pub fn execute_split(&self, split: &ShardSplit) -> RaftResult<()> {
+        let mut shards = self.shards.write();
+        let parent = shards
+            .get(&split.source_shard_id)
+            .ok_or_else(|| RaftError::Other {
+                message: format!("execute_split: shard {} not found", split.source_shard_id),
+            })?
+            .clone();
+        if parent.state != ShardState::Active {
+            return Err(RaftError::Other {
+                message: format!(
+                    "execute_split: shard {} is not Active (state={})",
+                    split.source_shard_id,
+                    parent.state.as_str()
+                ),
+            });
+        }
+        let (left, right) = split.create_shards(&parent)?;
+        shards.insert(left.id, left);
+        shards.insert(right.id, right);
+        shards.remove(&split.source_shard_id);
+        Ok(())
+    }
+
+    /// Atomic merge: both sources validated as Active, merged shard inserted, sources removed.
+    pub fn execute_merge(&self, merge: &ShardMerge) -> RaftResult<()> {
+        let mut shards = self.shards.write();
+        let left = shards
+            .get(&merge.left_shard_id)
+            .ok_or_else(|| RaftError::Other {
+                message: format!(
+                    "execute_merge: left shard {} not found",
+                    merge.left_shard_id
+                ),
+            })?
+            .clone();
+        let right = shards
+            .get(&merge.right_shard_id)
+            .ok_or_else(|| RaftError::Other {
+                message: format!(
+                    "execute_merge: right shard {} not found",
+                    merge.right_shard_id
+                ),
+            })?
+            .clone();
+        if left.state != ShardState::Active {
+            return Err(RaftError::Other {
+                message: format!(
+                    "execute_merge: left shard {} is not Active (state={})",
+                    merge.left_shard_id,
+                    left.state.as_str()
+                ),
+            });
+        }
+        if right.state != ShardState::Active {
+            return Err(RaftError::Other {
+                message: format!(
+                    "execute_merge: right shard {} is not Active (state={})",
+                    merge.right_shard_id,
+                    right.state.as_str()
+                ),
+            });
+        }
+        // create_merged_shard validates adjacency using Active metadata.
+        let merged = merge.create_merged_shard(&left, &right)?;
+        shards.remove(&merge.left_shard_id);
+        shards.remove(&merge.right_shard_id);
+        shards.insert(merged.id, merged);
+        Ok(())
+    }
+
+    /// Atomic transfer: source shard set to Transferring state; a new shard record
+    /// with a freshly allocated ID is inserted for the target node as Active.
+    ///
+    /// Lock ordering: `next_shard_id` Mutex is acquired first (briefly), then
+    /// `shards` RwLock — consistent order prevents deadlock.
+    pub fn execute_transfer(&self, transfer: &ShardTransfer) -> RaftResult<()> {
+        // Allocate the new shard ID before acquiring the shards write-lock
+        // so we never hold both locks simultaneously.
+        let new_target_id = self.allocate_shard_id();
+
+        let mut shards = self.shards.write();
+        let source = shards
+            .get(&transfer.shard_id)
+            .ok_or_else(|| RaftError::Other {
+                message: format!("execute_transfer: shard {} not found", transfer.shard_id),
+            })?
+            .clone();
+        if source.state != ShardState::Active {
+            return Err(RaftError::Other {
+                message: format!(
+                    "execute_transfer: shard {} is not Active (state={})",
+                    transfer.shard_id,
+                    source.state.as_str()
+                ),
+            });
+        }
+        // Build target metadata on the destination node (same range, new ID, Active state).
+        let target_shard =
+            ShardMetadata::new(new_target_id, source.range.clone(), transfer.to_node);
+        // Transition source to Transferring.
+        let mut source_transferring = source;
+        source_transferring.set_state(ShardState::Transferring);
+        // Apply both changes atomically under the single write-lock.
+        shards.insert(source_transferring.id, source_transferring);
+        shards.insert(new_target_id, target_shard);
+        Ok(())
+    }
 }
 
 impl Default for ShardRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strategy: lowercase ASCII string, length [min, max].
+    fn arb_key_str(min: usize, max: usize) -> impl Strategy<Value = String> {
+        prop::collection::vec(b'a'..=b'z', min..=max)
+            .prop_map(|v| String::from_utf8(v).expect("valid utf-8"))
+    }
+
+    proptest! {
+        #[test]
+        fn prop_key_range_contains_consistent(
+            start in arb_key_str(1, 8),
+            mid in arb_key_str(1, 8),
+            end in arb_key_str(1, 8),
+        ) {
+            // Only test when start < end (valid range).
+            prop_assume!(start < end);
+            let range = match KeyRange::new(Key::from_str(&start), Key::from_str(&end)) {
+                Ok(r) => r,
+                Err(_) => return Ok(()),
+            };
+            let mid_key = Key::from_str(&mid);
+            // [start, end) — inclusive start, exclusive end.
+            let expected = mid >= start && mid < end;
+            prop_assert_eq!(
+                range.contains(&mid_key),
+                expected,
+                "contains({:?}) in [{:?}, {:?}) should be {}",
+                mid,
+                start,
+                end,
+                expected
+            );
+        }
+
+        #[test]
+        fn prop_key_range_midpoint_is_between_bounds(
+            start in arb_key_str(1, 5),
+            end in arb_key_str(6, 12),
+        ) {
+            // Property: midpoint lies strictly inside [start, end).
+            // Use disjoint length ranges so start < end almost always holds.
+            prop_assume!(start < end);
+            let range = match KeyRange::new(Key::from_str(&start), Key::from_str(&end)) {
+                Ok(r) => r,
+                Err(_) => return Ok(()),
+            };
+            let mid = range.midpoint();
+            // Midpoint must satisfy start <= mid < end.
+            prop_assert!(
+                mid >= range.start,
+                "midpoint {:?} must be >= start {:?}",
+                mid,
+                range.start
+            );
+            prop_assert!(
+                mid < range.end,
+                "midpoint {:?} must be < end {:?}",
+                mid,
+                range.end
+            );
+        }
+
+        #[test]
+        fn prop_key_range_split_no_overlap(
+            start in arb_key_str(1, 4),
+            end in arb_key_str(8, 12),
+        ) {
+            // Property: after split at midpoint, no key is in both halves.
+            prop_assume!(start < end);
+            let range = match KeyRange::new(Key::from_str(&start), Key::from_str(&end)) {
+                Ok(r) => r,
+                Err(_) => return Ok(()),
+            };
+            let mid = range.midpoint();
+            let (left, right) = match (
+                KeyRange::new(range.start.clone(), mid.clone()),
+                KeyRange::new(mid.clone(), range.end.clone()),
+            ) {
+                (Ok(l), Ok(r)) => (l, r),
+                _ => return Ok(()), // degenerate midpoint — skip
+            };
+            // Spot-check: start key is in left, never in right.
+            let test_key = Key::from_str(&start);
+            let in_left = left.contains(&test_key);
+            let in_right = right.contains(&test_key);
+            prop_assert!(
+                !(in_left && in_right),
+                "start key {:?} must not be in both halves after split",
+                test_key
+            );
+        }
+
+        #[test]
+        fn prop_shard_registry_count_matches_unique_registrations(
+            raw_ids in prop::collection::vec(1u64..=20u64, 1..=8)
+        ) {
+            // Property: registry count == number of unique shards successfully registered.
+            let registry = ShardRegistry::new();
+            // Collect non-overlapping ranges by building shards with single-byte keys.
+            // We use each unique id to claim a single 1-byte slice of the keyspace.
+            let mut distinct_ids: Vec<u64> = raw_ids.clone();
+            distinct_ids.sort_unstable();
+            distinct_ids.dedup();
+
+            // Each shard gets a unique 1-byte range: [i, i+1)
+            let mut registered = 0usize;
+            for (slot, _id) in distinct_ids.iter().enumerate() {
+                let start_byte = slot as u8;
+                // Stop before overflow
+                if start_byte == u8::MAX {
+                    break;
+                }
+                let range = match KeyRange::new(
+                    Key::from_slice(&[start_byte]),
+                    Key::from_slice(&[start_byte + 1]),
+                ) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let shard_id = registry.allocate_shard_id();
+                let shard = ShardMetadata::new(shard_id, range, 1);
+                if registry.register(shard).is_ok() {
+                    registered += 1;
+                }
+            }
+
+            let count = registry.count();
+            prop_assert_eq!(
+                count,
+                registered,
+                "registry.count() must equal number of successfully registered shards"
+            );
+        }
+
+        #[test]
+        fn prop_shard_registry_find_key_correctness(
+            start_byte in 0u8..100u8,
+            end_byte in 101u8..=200u8,
+            query_byte in 0u8..=255u8,
+        ) {
+            // Property: find_shard_for_key returns Some iff query is in [start, end).
+            let registry = ShardRegistry::new();
+            let range = match KeyRange::new(
+                Key::from_slice(&[start_byte]),
+                Key::from_slice(&[end_byte]),
+            ) {
+                Ok(r) => r,
+                Err(_) => return Ok(()),
+            };
+            let shard_id = registry.allocate_shard_id();
+            let shard = ShardMetadata::new(shard_id, range, 1);
+            registry.register(shard).expect("register shard");
+
+            let query = Key::from_slice(&[query_byte]);
+            let found = registry.find_shard_for_key(&query);
+            let in_range = query_byte >= start_byte && query_byte < end_byte;
+            prop_assert_eq!(
+                found.is_some(),
+                in_range,
+                "find_shard_for_key({}) in [{}, {}) should be {}",
+                query_byte,
+                start_byte,
+                end_byte,
+                in_range
+            );
+        }
     }
 }
 
@@ -539,15 +825,13 @@ mod tests {
 
     #[test]
     fn test_key_range_contains() -> RaftResult<()> {
-        let range = KeyRange::new(
-            Key::from_str("a"),
-            Key::from_str("z"),
-        )?;
+        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z"))?;
 
         assert!(range.contains(&Key::from_str("m")));
         assert!(range.contains(&Key::from_str("a")));
         assert!(!range.contains(&Key::from_str("z")));
-        assert!(!range.contains(&Key::from_str("aa")));
+        assert!(range.contains(&Key::from_str("aa"))); // "aa" > "a" and "aa" < "z" lexicographically
+        assert!(!range.contains(&Key::from_str("{"))); // "{" has ASCII 123 > 'z' (122), outside range
 
         Ok(())
     }
@@ -567,10 +851,7 @@ mod tests {
 
     #[test]
     fn test_key_range_midpoint() -> RaftResult<()> {
-        let range = KeyRange::new(
-            Key::from_str("a"),
-            Key::from_str("z"),
-        )?;
+        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z"))?;
 
         let mid = range.midpoint();
         assert!(mid > range.start);
@@ -581,8 +862,7 @@ mod tests {
 
     #[test]
     fn test_shard_metadata_creation() {
-        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z"))
-            .expect("valid range");
+        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z")).expect("valid range");
         let shard = ShardMetadata::new(1, range, 100);
 
         assert_eq!(shard.id, 1);
@@ -593,8 +873,7 @@ mod tests {
 
     #[test]
     fn test_shard_metadata_update_stats() {
-        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z"))
-            .expect("valid range");
+        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z")).expect("valid range");
         let mut shard = ShardMetadata::new(1, range, 100);
 
         let initial_version = shard.version;
@@ -693,7 +972,12 @@ mod tests {
 
         let retrieved = registry.get(id1);
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.expect("Shard should be retrieved from registry").id, id1);
+        assert_eq!(
+            retrieved
+                .expect("Shard should be retrieved from registry")
+                .id,
+            id1
+        );
 
         let found = registry.find_shard_for_key(&Key::from_str("g"));
         assert!(found.is_some());
@@ -723,8 +1007,7 @@ mod tests {
 
     #[test]
     fn test_hot_cold_shards() {
-        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z"))
-            .expect("valid range");
+        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z")).expect("valid range");
         let mut shard = ShardMetadata::new(1, range, 100);
 
         shard.update_stats(1000, 50000);
@@ -734,5 +1017,194 @@ mod tests {
         shard.update_stats(100, 5000);
         assert!(!shard.is_hot(500, 25000));
         assert!(shard.is_cold(500, 25000));
+    }
+
+    #[test]
+    fn test_execute_split() -> RaftResult<()> {
+        let registry = ShardRegistry::new();
+
+        // Register source shard covering "a".."z"
+        let src_id = registry.allocate_shard_id();
+        let left_id = registry.allocate_shard_id();
+        let right_id = registry.allocate_shard_id();
+
+        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z"))?;
+        let mut source = ShardMetadata::new(src_id, range, 1);
+        source.update_stats(1000, 100_000);
+        registry.register(source)?;
+
+        let split = ShardSplit::new(src_id, left_id, right_id, Key::from_str("m"));
+        registry.execute_split(&split)?;
+
+        // Source shard must be gone.
+        assert!(
+            registry.get(src_id).is_none(),
+            "source shard must be removed after split"
+        );
+
+        // Both children must exist and be Active.
+        let left = registry.get(left_id).expect("left child shard must exist");
+        let right = registry
+            .get(right_id)
+            .expect("right child shard must exist");
+        assert_eq!(left.state, ShardState::Active);
+        assert_eq!(right.state, ShardState::Active);
+        assert_eq!(left.range.start, Key::from_str("a"));
+        assert_eq!(left.range.end, Key::from_str("m"));
+        assert_eq!(right.range.start, Key::from_str("m"));
+        assert_eq!(right.range.end, Key::from_str("z"));
+        assert_eq!(registry.count(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_split_non_active_fails() -> RaftResult<()> {
+        let registry = ShardRegistry::new();
+
+        let src_id = registry.allocate_shard_id();
+        let left_id = registry.allocate_shard_id();
+        let right_id = registry.allocate_shard_id();
+
+        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z"))?;
+        let mut source = ShardMetadata::new(src_id, range, 1);
+        source.set_state(ShardState::Offline);
+        registry.register(source)?;
+
+        let split = ShardSplit::new(src_id, left_id, right_id, Key::from_str("m"));
+        let result = registry.execute_split(&split);
+        assert!(result.is_err(), "split of non-Active shard must fail");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_merge() -> RaftResult<()> {
+        let registry = ShardRegistry::new();
+
+        let left_id = registry.allocate_shard_id();
+        let right_id = registry.allocate_shard_id();
+        let merged_id = registry.allocate_shard_id();
+
+        let left_range = KeyRange::new(Key::from_str("a"), Key::from_str("m"))?;
+        let right_range = KeyRange::new(Key::from_str("m"), Key::from_str("z"))?;
+
+        let mut left = ShardMetadata::new(left_id, left_range, 1);
+        left.update_stats(500, 50_000);
+        let mut right = ShardMetadata::new(right_id, right_range, 1);
+        right.update_stats(500, 50_000);
+
+        registry.register(left)?;
+        registry.register(right)?;
+
+        let merge = ShardMerge::new(left_id, right_id, merged_id);
+        registry.execute_merge(&merge)?;
+
+        // Both sources must be removed.
+        assert!(
+            registry.get(left_id).is_none(),
+            "left source must be removed after merge"
+        );
+        assert!(
+            registry.get(right_id).is_none(),
+            "right source must be removed after merge"
+        );
+
+        // Merged shard must exist as Active with combined range and stats.
+        let merged = registry.get(merged_id).expect("merged shard must exist");
+        assert_eq!(merged.state, ShardState::Active);
+        assert_eq!(merged.range.start, Key::from_str("a"));
+        assert_eq!(merged.range.end, Key::from_str("z"));
+        assert_eq!(merged.estimated_keys, 1000);
+        assert_eq!(merged.estimated_size_bytes, 100_000);
+        assert_eq!(registry.count(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_merge_non_active_fails() -> RaftResult<()> {
+        let registry = ShardRegistry::new();
+
+        let left_id = registry.allocate_shard_id();
+        let right_id = registry.allocate_shard_id();
+        let merged_id = registry.allocate_shard_id();
+
+        let left_range = KeyRange::new(Key::from_str("a"), Key::from_str("m"))?;
+        let right_range = KeyRange::new(Key::from_str("m"), Key::from_str("z"))?;
+
+        let left = ShardMetadata::new(left_id, left_range, 1);
+        let mut right = ShardMetadata::new(right_id, right_range, 1);
+        right.set_state(ShardState::Merging);
+
+        registry.register(left)?;
+        registry.register(right)?;
+
+        let merge = ShardMerge::new(left_id, right_id, merged_id);
+        let result = registry.execute_merge(&merge);
+        assert!(result.is_err(), "merge with non-Active shard must fail");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_transfer() -> RaftResult<()> {
+        let registry = ShardRegistry::new();
+
+        let src_id = registry.allocate_shard_id();
+        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z"))?;
+        let source = ShardMetadata::new(src_id, range, 1);
+        registry.register(source)?;
+
+        let transfer = ShardTransfer::new(src_id, 1, 2);
+        registry.execute_transfer(&transfer)?;
+
+        // Source shard must now be in Transferring state.
+        let updated_source = registry.get(src_id).expect("source shard must still exist");
+        assert_eq!(
+            updated_source.state,
+            ShardState::Transferring,
+            "source shard must be Transferring after transfer initiation"
+        );
+        assert_eq!(
+            updated_source.node_id, 1,
+            "source node_id must be unchanged"
+        );
+
+        // A new shard record for the target node must have been inserted.
+        let all_shards = registry.get_all();
+        assert_eq!(
+            all_shards.len(),
+            2,
+            "registry must have exactly two shards (source + target)"
+        );
+
+        let target_shard = all_shards
+            .iter()
+            .find(|s| s.id != src_id)
+            .expect("target shard must exist");
+        assert_eq!(target_shard.state, ShardState::Active);
+        assert_eq!(target_shard.node_id, 2);
+        assert_eq!(target_shard.range.start, Key::from_str("a"));
+        assert_eq!(target_shard.range.end, Key::from_str("z"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_transfer_non_active_fails() -> RaftResult<()> {
+        let registry = ShardRegistry::new();
+
+        let src_id = registry.allocate_shard_id();
+        let range = KeyRange::new(Key::from_str("a"), Key::from_str("z"))?;
+        let mut source = ShardMetadata::new(src_id, range, 1);
+        source.set_state(ShardState::Transferring);
+        registry.register(source)?;
+
+        let transfer = ShardTransfer::new(src_id, 1, 2);
+        let result = registry.execute_transfer(&transfer);
+        assert!(result.is_err(), "transfer of non-Active shard must fail");
+
+        Ok(())
     }
 }

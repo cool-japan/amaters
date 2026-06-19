@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::time::sleep;
@@ -129,11 +130,29 @@ pub enum ServerError {
     #[error("Shutdown timeout")]
     ShutdownTimeout,
 
+    #[error("Resource exhausted: {0}")]
+    ResourceExhausted(String),
+
+    #[error("Migration error: {0}")]
+    Migration(String),
+
     #[error("Core error: {0}")]
     Core(#[from] amaters_core::error::AmateRSError),
 }
 
 pub type ServerResult<T> = Result<T, ServerError>;
+
+/// RAII guard that decrements the active query counter on drop.
+#[derive(Debug)]
+pub struct QueryGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for QueryGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// Classify [`ServerError`] variants as transient (retriable) or permanent.
 ///
@@ -166,6 +185,8 @@ impl crate::retry::ErrorClassification for ServerError {
             | ServerError::TlsSetup(_)
             | ServerError::AlreadyRunning
             | ServerError::ShutdownTimeout
+            | ServerError::ResourceExhausted(_)
+            | ServerError::Migration(_)
             | ServerError::Core(_) => false,
         }
     }
@@ -208,6 +229,8 @@ pub struct Server {
     health: HealthChecker,
     /// Metrics collector
     metrics: MetricsCollector,
+    /// Active query counter for resource limit enforcement
+    active_queries: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -222,6 +245,7 @@ impl Server {
             shutdown: ShutdownCoordinator::new(),
             health: HealthChecker::new(),
             metrics: MetricsCollector::new(),
+            active_queries: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -644,6 +668,29 @@ impl Server {
         Ok(())
     }
 
+    /// Attempt to register a new active query.
+    /// Returns Ok(QueryGuard) if under the limit, Err if RESOURCE_EXHAUSTED.
+    pub fn try_acquire_query(&self) -> Result<QueryGuard, ServerError> {
+        let limit = self.config.resource_limits.max_active_queries;
+        let current = self.active_queries.fetch_add(1, Ordering::AcqRel);
+        if current >= limit {
+            self.active_queries.fetch_sub(1, Ordering::AcqRel);
+            Err(ServerError::ResourceExhausted(format!(
+                "Active query limit ({}) exceeded",
+                limit
+            )))
+        } else {
+            Ok(QueryGuard {
+                counter: Arc::clone(&self.active_queries),
+            })
+        }
+    }
+
+    /// Get current active query count
+    pub fn active_query_count(&self) -> usize {
+        self.active_queries.load(Ordering::Acquire)
+    }
+
     /// Send stop signal to running server
     #[cfg(unix)]
     pub fn stop_server(config: &ServerConfig, force: bool) -> ServerResult<()> {
@@ -894,5 +941,48 @@ mod tests {
         if server.config.server.data_dir.exists() {
             fs::remove_dir_all(&server.config.server.data_dir).ok();
         }
+    }
+
+    #[tokio::test]
+    async fn test_max_active_queries_enforced() {
+        let mut config = ServerConfig::default();
+        config.resource_limits.max_active_queries = 2;
+        let server = Server::new(config);
+
+        // Acquire up to limit
+        let _guard1 = server.try_acquire_query().expect("Should acquire query 1");
+        let _guard2 = server.try_acquire_query().expect("Should acquire query 2");
+
+        // Exceed limit
+        let result = server.try_acquire_query();
+        assert!(result.is_err());
+        match result {
+            Err(ServerError::ResourceExhausted(_)) => {}
+            other => panic!("Expected ResourceExhausted, got {:?}", other),
+        }
+
+        assert_eq!(server.active_query_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_query_guard_decrements_on_drop() {
+        let mut config = ServerConfig::default();
+        config.resource_limits.max_active_queries = 5;
+        let server = Server::new(config);
+
+        {
+            let _guard = server.try_acquire_query().expect("Should acquire");
+            assert_eq!(server.active_query_count(), 1);
+        } // guard dropped here
+
+        assert_eq!(server.active_query_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_per_client_connection_limit() {
+        // Tests that the ResourceLimits config is accessible and has correct defaults
+        let config = ServerConfig::default();
+        assert_eq!(config.resource_limits.max_connections_per_client, 10);
+        assert_eq!(config.resource_limits.max_active_queries, 1000);
     }
 }
