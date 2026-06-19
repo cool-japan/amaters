@@ -1,4 +1,4 @@
-# amaters-sdk-rust TODO
+# amaters-sdk-rust TODO (v0.2.3)
 
 ## Phase 1: Core Client ✅
 
@@ -34,7 +34,7 @@
 - [x] FHE operations (requires `fhe` feature)
   - **Goal:** Expose client-side homomorphic add/sub/mul, eq/ne/lt/le/gt/ge comparisons, and/or/xor/not boolean ops on encrypted values via a new `FheValue` wrapper type under the `fhe` feature.
   - **Design:** Add `ServerKey` to `FheKeys` (currently ClientKey-only); add `boolean`, `shortint`, `integer` to the sdk-rust `tfhe` dep feature list (Cargo.toml:33, to match core). Introduce `FheValue { inner: FheValueInner }` (enum over `EncryptedBool`, `EncryptedU8..U64` from `amaters_core::compute`), or thin tfhe wrappers if core dep is undesired. `set_as_global_server_key` in op context. Add `FheValue::encrypt_u8/u16/u32/u64/bool`, `decrypt_*`, and the op methods.
-  - **Files:** `src/fhe.rs` (extended), or introduce `src/fhe_ops.rs` (new) if `fhe.rs` grows beyond 600 lines; `Cargo.toml` (add features to tfhe dep)
+  - **Files:** `src/fhe_ops.rs` (new — introduced as `fhe.rs` exceeded 600 lines); `Cargo.toml` (features added to tfhe dep)
   - **Tests:** `test_fhe_addition` (enc(5)+enc(3)==8); `test_fhe_multiplication`; `test_fhe_comparison_all_ops` (eq/ne/lt/le/gt/ge); `test_fhe_boolean_and_or_xor_not` — all gated `#[cfg(feature="fhe")]`
   - **Risk:** tfhe compile weight (feature "fhe" is opt-in, default off); thread-local server key per `set_as_global_server_key`. Mitigation: feature gate ensures CI default-features is unaffected; document thread requirement.
   - [x] Addition
@@ -160,6 +160,7 @@
 - Transactions (`begin`/`commit`/`rollback`)
 - Client-side LRU caching with TTL
 - Advanced examples (healthcare, financial)
+- FHE operation helpers (`fhe_ops.rs`) — homomorphic arithmetic, comparisons, boolean ops on `FheValue` (requires `fhe` feature)
 
 ### In Progress 🚧
 - gRPC integration (stubs currently)

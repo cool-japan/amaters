@@ -1,5 +1,13 @@
 # amaters-sdk-python TODO
 
+## v0.2.3 (in progress)
+
+### Completed
+- [x] Python test suite: 116 pytest tests (5 files: test_config.py, test_types.py, test_client_operations.py, test_error_handling.py, test_properties.py); all mock-backed, no compiled extension required
+
+### Planned
+- [ ] PyO3 export wiring — register `#[pyclass]`/`#[pyfunction]` exports in lib.rs for subscribe, streaming, and types modules
+
 ## v0.2.2 (2026-06-19)
 
 ### Completed

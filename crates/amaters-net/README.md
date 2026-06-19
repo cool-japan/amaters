@@ -4,7 +4,7 @@ Network layer for AmateRS (Musubi - The Knot)
 
 [![Alpha](https://img.shields.io/badge/status-alpha-orange)](https://github.com/cool-japan/amaters)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
-[![Version: 0.2.2](https://img.shields.io/badge/version-0.2.2-blue)](Cargo.toml)
+[![Version: 0.2.3](https://img.shields.io/badge/version-0.2.3-blue)](Cargo.toml)
 
 ## Overview
 
@@ -88,15 +88,34 @@ Two rate limiting algorithms are implemented:
 
 ### FHE Circuit Cache
 
-- `CircuitCache` — LRU cache for compiled FHE circuits, reducing redundant recompilation overhead
-- Configurable capacity with eviction on overflow
-- Thread-safe via `Arc<Mutex<...>>` internals
+- `CircuitCache` — thread-safe LRU cache for compiled FHE circuits, reducing redundant recompilation overhead
+- Configurable capacity (default 256 entries) with LRU eviction on overflow
+- Blake3-keyed cache entries for collision-resistant circuit identity
+- Thread-safe via `parking_lot::Mutex` internals
+
+### QUIC Transport
+
+- `QuicServer` / `QuicClient` via quinn 0.11 — UDP-based QUIC transport as an alternative to TCP/HTTP2
+- TLS 1.3 with rustls and ALPN negotiation (`amaters` protocol)
+- 0-RTT session resumption via rustls session tickets (enabled by default)
+- Native stream multiplexing (`open_bi` / `accept_bi`) and flow control
+- Connection migration support at the QUIC protocol level
+- See `quic_transport.rs`
 
 ### OpenTelemetry W3C TraceContext Propagation
 
 - W3C TraceContext header propagation (`traceparent` / `tracestate`) on all gRPC requests (feature `telemetry`)
+- `TraceparentExtractor` — extracts and parses inbound `traceparent` headers
+- `inject_trace_context` — injects current span context into outbound gRPC metadata
+- `TraceContextPropagatorLayer` — Tower layer wiring both inject and extract on every call
 - Outbound requests inject trace context; inbound requests extract and continue the span
 - Interoperable with any W3C-compliant distributed tracing backend
+- See `otel_propagator.rs`
+
+### Type Conversion Utilities
+
+- `convert.rs` module: helpers for converting between internal types and protobuf-generated types
+- `cipher_blob_to_proto` / `cipher_blob_raw_bytes` — zero-copy `bytes::Bytes` conversion for `CipherBlob`
 
 ## Architecture
 

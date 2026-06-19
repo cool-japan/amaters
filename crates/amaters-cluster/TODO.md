@@ -1,6 +1,6 @@
 # amaters-cluster TODO
 
-## Implemented (v0.2.2) ✅
+## Implemented (v0.2.3) ✅
 
 - [x] Raft consensus: leader election, log replication, joint consensus
 - [x] State machine with batch apply and snapshotting
@@ -8,6 +8,15 @@
 - [x] Snapshot management (create, store, transfer, truncate log)
 - [x] Node management and dynamic membership changes
 - [x] 440 tests passing
+- [x] Placement scheduler (`PlacementScheduler`, `PlacementCoordinator`) — shard split/merge/rebalance detection, runs on Raft leader
+- [x] Alert rules engine (`RuleEngine`) — severity (Info/Warning/Critical), dedup window, fan-out sinks
+- [x] `ClusterCommand` typed Raft log (7 variants: DataPut, DataDelete, PlaceSplit, PlaceMerge, PlaceTransfer, MembershipAdd, MembershipRemove) encoded with postcard
+- [x] Chunked snapshot streaming (configurable threshold, per-follower `SnapshotStreamer`)
+- [x] Cluster topology management (`cluster_topology.rs`)
+- [x] Cluster command abstraction (`cluster_command.rs`)
+- [x] Failover module (`failover.rs`) with `AlertEvent` and `AlertManager` fan-out
+- [x] 10 chaos engineering tests (in-memory Raft adversarial scenarios in `tests/chaos_tests.rs`)
+- [x] Placement state machine (`placement_state_machine.rs`)
 
 ## Upcoming Work
 

@@ -1,6 +1,6 @@
 # amaters-core TODO
 
-## v0.2.2 Status (Alpha) - 481 tests passing
+## v0.2.3 Status (Alpha) - 481 tests passing
 
 ---
 
@@ -102,7 +102,7 @@
 ## Phase 4: Advanced Features [PLANNED]
 
 ### I/O Optimization
-- [x] `io_uring` WAL writer (Linux) - `UringWalWriter` with feature `io-uring`; async file operations for WAL (done 0.2.2)
+- [x] `io_uring` WAL writer (Linux) - `UringWalWriter` with feature `io-uring`; async file operations for WAL (done 0.2.2); WAL tests extracted to `wal_tests.rs` (0.2.3)
 - [x] Prefetching strategies for mmap workloads (done 2026-06-14)
   - **Note (2026-06-14):** `PrefetchConfig { read_ahead_blocks: usize, use_madvise: bool }` added to `lsm_tree.rs` with `impl Default` (4 blocks, madvise off by default for Pure Rust portability). `LsmTree::with_prefetch(config)` builder method stores the config for use during sequential range scans. Re-exported from `storage::mod.rs`. Tests: `test_prefetch_config_default`, `test_lsm_tree_with_prefetch_config`. OS-level madvise is already available via `MmapPrefetcher::advise` (feature `mmap`).
 
@@ -113,7 +113,7 @@
   - **Files:** `src/compute/planner.rs`, `src/types/query.rs` (if `Query::Join` surface needed). If planner.rs exceeds 2000 lines after changes → split via `splitrs`.
   - **Tests:** `test_conjunction_split_key_to_range_scan`; `test_predicate_reorder_cheap_first`; `test_join_cost_picks_smaller_build_side`; `test_join_hash_vs_nested_loop_selection`; `test_join_pushdown_into_inputs`; `test_join_explain_output`
   - **Risk:** Unknown encrypted-key selectivity; join IR is greenfield. Mitigation: conservative selectivity defaults; nested-loop as correct fallback; hash join gated to plaintext keys.
-- [x] Encrypted index structures
+- [x] Encrypted index structures (`EncryptedIndex`, `IndexRegistry` — done 0.2.3)
 - [x] Index maintenance automation
 - [x] `IndexExtractor` trait — automated secondary index maintenance in `LsmTreeStorage` and `MemoryStorage` (done 0.2.2)
 
@@ -140,8 +140,9 @@
   - **Tests:** `test_op_counter_increments`, `test_latency_histogram_records`
   - **Risk:** Metrics must not add measurable latency to hot path.
   - **Refinement (2026-04-17):** Landed as hand-rolled AtomicU64 facade with Prometheus text export; no metrics-rs dep, pure Rust.
-- [x] Distributed tracing support (span annotations)
-- [x] CPU/memory profiling integration
+- [x] Distributed tracing support (`TelemetryConfig` + `TelemetryGuard`, OpenTelemetry OTLP gRPC, feature `telemetry`)
+- [x] CPU/memory profiling integration (`ProfilingGuard`, scoped profiling with drop-based summary)
+- [x] Constant-time operation utilities (`crypto::constant_time`: `constant_time_eq`, `constant_time_select`, `constant_time_select_slice`)
 
 ---
 

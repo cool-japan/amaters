@@ -2,7 +2,7 @@
 
 AmateRS Database Server
 
-**Status:** Alpha | **Version:** 0.2.2 | **License:** Apache-2.0 | **Tests:** 470 passing, 23 skipped (performance benchmarks) | **Public items:** ~400
+**Status:** Alpha | **Version:** 0.2.3 | **License:** Apache-2.0 | **Tests:** 470 passing, 23 skipped (performance benchmarks) | **Public items:** ~400
 
 ## Overview
 
@@ -21,8 +21,16 @@ AmateRS Database Server
 - **Log rotation**: Time-based (hourly/daily) and size-based (`Rotation::Size(u64)`) via custom `SizeRotatingWriter`; automatic rollover and old-file cleanup
 - **Graceful shutdown hooks**: WAL writer flush, memtable flush, connection drain
 - **Server configuration**: TOML-based with environment variable and CLI overrides
-- **Migration registry**: `MigrationRegistry` for versioned document migrations — register, look up, and apply named migration functions by version key
-- **Constant-time API key comparison**: security fix — API key verification uses `subtle::ConstantTimeEq` to prevent timing-based key enumeration
+- **Constant-time API key validation**: `auth.rs` and `middleware.rs` use `constant_time_eq` crate for API key verification — prevents timing side-channel attacks on key enumeration
+- **Migration framework** (`migration.rs`): `MigrationRegistry` with versioned document migrations, BFS path planning, `Migration` trait, and `MigrationContext` for structured schema evolution
+- **Admin endpoints** (`admin.rs`): in-process `AdminApi` for cluster status, snapshot management, and health queries
+- **Cluster integration** (`cluster_integration.rs`): `ClusterHandle` dispatches between `Standalone` (single-node, always-leader) and full Raft mode via `amaters-cluster`
+- **Snapshot support** (`snapshot.rs`): `SnapshotManager` with write/read/list/delete; LZ4 compression (oxiarc-lz4), FNV-64 checksum; `SnapshotUploader` trait for remote storage
+- **TLS config** (`tls_config.rs`): TLS certificate and key management with hot-reload support via `ArcSwap<TlsCreds>`
+- **Version management** (`version.rs`): `VersionHandshake` with compatibility gating, `CURRENT_VERSION` and `MIN_COMPATIBLE_VERSION` constants
+- **Graceful shutdown**: WAL flush, memtable flush, connection drain — fully implemented
+- **Hot reload**: SIGHUP-triggered config reload and TLS certificate rotation with zero downtime
+- **Log rotation**: time-based (hourly/daily) and size-based (`LogRotation::Size(u64)`) via custom `SizeRotatingWriter`
 
 ## Installation
 
@@ -130,9 +138,27 @@ amaters-server
 ├── Query Engine
 │   ├── GET / SET / DELETE / RANGE handlers
 │   └── Result Cache (LRU + blake3 + write-through)
-├── Migration Registry (src/migration_registry.rs)
-│   ├── Versioned document migrations
-│   └── Named migration functions by version key
+├── Migration Framework (src/migration.rs)
+│   ├── MigrationRegistry with BFS path planning
+│   ├── Migration trait + MigrationContext
+│   └── Versioned document schema evolution
+├── Admin API (src/admin.rs)
+│   ├── ClusterStatusResponse
+│   ├── Snapshot management
+│   └── Health queries
+├── Cluster Integration (src/cluster_integration.rs)
+│   ├── ClusterHandle (Standalone / Raft dispatch)
+│   └── ShardRegistry
+├── Snapshot Manager (src/snapshot.rs)
+│   ├── write / read / list / delete
+│   ├── LZ4 compression (oxiarc-lz4) + FNV-64 checksum
+│   └── SnapshotUploader trait
+├── Version Management (src/version.rs)
+│   ├── VersionHandshake
+│   └── Compatibility gating
+├── TLS Config (src/tls_config.rs)
+│   ├── TlsCreds store (ArcSwap)
+│   └── Hot-reload support
 ├── Storage
 │   ├── Memory backend
 │   └── LSM-Tree (WAL + memtable)

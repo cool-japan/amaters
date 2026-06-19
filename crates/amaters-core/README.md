@@ -7,9 +7,9 @@ Core kernel for AmateRS - Fully Homomorphic Encrypted Database
 `amaters-core` is the foundational crate of AmateRS, providing the core infrastructure for encrypted data storage and computation. It implements the **Iwato** (storage) and **Yata** (compute) components of the AmateRS architecture.
 
 **Status:** Alpha (functional, API may change)
-**Version:** 0.2.2
+**Version:** 0.2.3
 **Tests:** 481 passing, 0 failures
-**Public API:** ~703 items
+**Public API:** ~694 items
 **Stubs:** 0 (`todo!()` / `unimplemented!()`)
 
 ## Architecture
@@ -30,6 +30,9 @@ AmateRS core is inspired by Japanese mythology:
 | `traits` | `StorageEngine` async trait definitions |
 | `storage` | Iwato: LSM-Tree, WAL, SSTable, compaction, bloom filters, block cache, value log (WiscKey), value log GC worker, secondary index, manifest, mmap reader, backup/restore, compression |
 | `compute` | Yata: FHE circuits, optimizer, planner, GPU detection, key management |
+| `crypto` | `constant_time` utilities for side-channel-resistant comparisons |
+| `telemetry` | `TelemetryConfig` + `TelemetryGuard` (OpenTelemetry OTLP gRPC, feature `telemetry`) |
+| `profiling` | `ProfilingGuard` for scoped CPU/memory profiling |
 | `validation` | Input validation helpers |
 | `utils` | Internal utilities |
 
@@ -40,6 +43,8 @@ storage/
 ├── memory.rs            -- In-memory storage (MemoryStorage)
 ├── memtable.rs          -- BTree-based sorted memtable
 ├── wal.rs               -- Write-Ahead Log with CRC32, rotation, crash recovery
+├── wal_uring.rs         -- io-uring WAL writer (UringWalWriter, feature = "io-uring", Linux only)
+├── wal_tests.rs         -- WAL unit tests (extracted from wal.rs)
 ├── sstable.rs           -- Sorted String Table (block format, index, checksum)
 ├── block_cache.rs       -- LRU block cache with configurable size and metrics
 ├── bloom_filter.rs      -- Bloom filter for key existence checks
@@ -50,7 +55,9 @@ storage/
 ├── value_log.rs         -- WiscKey value log (sequential append, value separation)
 ├── value_log_gc.rs      -- GC statistics and segment management
 ├── value_log_gc_worker.rs -- Background GC worker thread
-├── secondary_index.rs   -- Secondary index support (IndexManager)
+├── secondary_index.rs   -- Secondary index support (IndexManager, IndexExtractor trait)
+├── encrypted_index.rs   -- Encrypted index (EncryptedIndex) with oxicode serialization
+├── index_registry.rs    -- IndexRegistry: multi-index management
 ├── mmap_reader.rs       -- Memory-mapped SSTable reader (feature = "mmap")
 ├── backup.rs            -- Backup/restore with BackupManager
 ├── compression.rs       -- LZ4 + DEFLATE via OxiARC (CompressionType)
@@ -64,7 +71,8 @@ storage/
 compute/
 ├── circuit.rs      -- Circuit AST (CircuitNode), type inference, CircuitBuilder
 ├── optimizer.rs    -- Constant folding, dead code elimination, algebraic simplification
-├── planner.rs      -- LogicalPlan / PhysicalPlan, cost model, QueryPlanner
+├── optimizer_tests.rs -- Optimizer unit tests (extracted from optimizer.rs)
+├── planner/        -- LogicalPlan / PhysicalPlan, cost model, QueryPlanner (split module)
 ├── plan_cache.rs   -- Compiled plan caching
 ├── key_manager.rs  -- KeyManager, per-client key lifecycle
 ├── keys.rs         -- FheKeyPair generation, KeyStorage trait, InMemoryKeyStorage
@@ -171,12 +179,18 @@ fn risky_operation(value: &[u8]) -> Result<()> {
 | `cuda` | Enable CUDA backend (requires `gpu`) |
 | `metal` | Enable Metal backend for macOS (requires `gpu`) |
 | `io-uring` | Enable io-uring WAL writer (Linux only) |
+| `telemetry` | Enable OpenTelemetry OTLP gRPC tracing (`TelemetryConfig` + `TelemetryGuard`) |
 
-## What's New in v0.2.2
+## What's New in v0.2.3
 
 - **UringWalWriter** — io-uring-backed WAL writer for Linux (feature `io-uring`), enabling kernel-bypass async I/O for write-ahead log operations
 - **IndexExtractor trait** — automated secondary index maintenance via a composable extractor interface; storage engines call `extract_index_entries` on write
 - **Secondary index automation** — `LsmTreeStorage` and `MemoryStorage` both drive `IndexExtractor`-based index maintenance automatically on `put`/`delete` operations
+- **EncryptedIndex / IndexRegistry** — encrypted secondary index with persistence (`serialize`/`deserialize`), grouped under `IndexRegistry` for multi-index management
+- **Telemetry** — `TelemetryConfig` + `TelemetryGuard` providing OpenTelemetry OTLP gRPC tracing (feature `telemetry`); guard shuts down the provider on drop
+- **Profiling** — `ProfilingGuard` for scoped CPU/memory profiling with drop-based summary reporting
+- **Constant-time utilities** — `crypto::constant_time` module: `constant_time_eq`, `constant_time_select`, `constant_time_select_slice` for side-channel-resistant comparisons
+- **Test extraction** — WAL tests extracted to `storage/wal_tests.rs`; optimizer tests to `compute/optimizer_tests.rs`; query planner split into `compute/planner/mod.rs`
 
 ## Dependencies
 
@@ -241,7 +255,7 @@ cargo bench
 | Phase 1 | Core types, error system, in-memory storage | Done |
 | Phase 2 | LSM-Tree, WAL, WiscKey, SSTable, compaction, secondary index, backup | Done |
 | Phase 3 | FHE compute engine, optimizer, planner, key management | Done (Alpha) |
-| Phase 4 | Query optimization, io_uring, GPU acceleration | Partial (io-uring WAL, index automation) |
+| Phase 4 | Query optimization, io_uring, GPU acceleration | Partial (io-uring WAL, index automation, encrypted index, telemetry, profiling, constant-time) |
 | Phase 5 | Production hardening, security audit, distributed consensus | Planned |
 
 ## License

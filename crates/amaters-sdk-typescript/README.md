@@ -6,13 +6,14 @@ TypeScript/WASM SDK for [AmateRS](https://github.com/cool-japan/amaters) — a d
 
 - 91 tests
 - 189 public API items
-- Version: 0.2.2
+- Version: 0.2.3
 - License: Apache-2.0
 
 ## Features
 
 - **Dual transport** — gRPC (WASM) for browser/Node.js environments and native HTTP/1.1 for server-side runtimes
-- **WebAssembly support** — compile to WASM for browser and Node.js via `wasm-bindgen`
+- **WebSocket transport** — `ws_transport.ts` (228 lines) provides a browser-compatible WebSocket transport layer
+- **WebAssembly support** — compile to WASM for browser and Node.js via `wasm-bindgen` (WASM pkg generation pending)
 - **Connection management** — configurable endpoints, timeout handling, and connection lifecycle
 - **Batch operations** — multi-key get/set/delete in a single round-trip
 - **Retry logic** — configurable retry with backoff for transient failures

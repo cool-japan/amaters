@@ -1,6 +1,6 @@
 # amaters-cli TODO
 
-## Status Summary (v0.2.2)
+## Status Summary (v0.2.3)
 
 | Phase | Title | Status |
 |-------|-------|--------|

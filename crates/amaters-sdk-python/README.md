@@ -2,10 +2,10 @@
 
 Python SDK for [AmateRS](https://github.com/cool-japan/amaters) — a distributed, Fully Homomorphic Encrypted (FHE) database system. This crate provides PyO3-based Python bindings built with [maturin](https://github.com/PyO3/maturin), exposing the AmateRS client API to Python applications.
 
-> **Status**: Alpha — API is stabilising. Not yet recommended for production use.
+> **Status**: Partial — Python test infrastructure complete (116 tests), Rust binding layer scaffolded but PyO3 exports not yet wired into lib.rs. Not yet recommended for production use.
 
-- Version: 0.2.2
-- 80 tests
+- Version: 0.2.3
+- 116 tests (mock-backed, no compiled extension required)
 - License: Apache-2.0
 
 ## Features
@@ -180,7 +180,9 @@ async def context_example():
 pytest python/tests/ -v
 ```
 
-The Python test suite contains 80 tests across 5 files (`test_config.py`, `test_types.py`, `test_client_operations.py`, `test_error_handling.py`, `test_properties.py`), including Hypothesis property-based tests. Tests use mock-backed clients and run without a live AmateRS server.
+The Python test suite contains 116 tests across 5 files (`test_config.py`, `test_types.py`, `test_client_operations.py`, `test_error_handling.py`, `test_properties.py`), including Hypothesis property-based tests. Tests use mock-backed clients and run without a live AmateRS server or compiled extension.
+
+> **Note**: The Rust binding layer (subscribe, streaming, types modules) is scaffolded but `#[pyclass]`/`#[pyfunction]` exports are not yet registered in lib.rs. PyO3 export wiring is planned for a future release.
 
 ## Feature Flags
 

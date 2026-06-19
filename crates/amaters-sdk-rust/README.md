@@ -10,7 +10,7 @@ Rust client SDK for [AmateRS](https://github.com/cool-japan/amaters) — a distr
 
 - 131 tests
 - 191 public API items
-- Version: 0.2.2
+- Version: 0.2.3
 - License: Apache-2.0
 
 ## Features
@@ -22,6 +22,7 @@ Rust client SDK for [AmateRS](https://github.com/cool-japan/amaters) — a distr
 - **Batch operations** — multi-key get/set/delete in a single round-trip
 - **Range queries** — efficient key-range scans
 - **Streaming queries** — `stream_query()` returns `QueryStream` (implements `futures::Stream`); backpressure via bounded `tokio::sync::mpsc`; cooperative cancellation via `CancellationToken` from `tokio_util::sync`
+- **FHE operation helpers** — `fhe_ops.rs` exposes client-side homomorphic add/sub/mul, eq/ne/lt/le/gt/ge comparisons, and boolean and/or/xor/not on `FheValue`-wrapped ciphertexts (requires `fhe` feature)
 - **Property-based tests** — proptest strategies for `QueryBuilder`, `AmatersError`, and codec round-trips
 - **Async/Await** — built on Tokio
 - **Comprehensive error types** — structured `Result`-based API throughout

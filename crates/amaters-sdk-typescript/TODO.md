@@ -1,5 +1,14 @@
 # amaters-sdk-typescript TODO
 
+## v0.2.3 (in progress)
+
+### Completed
+- [x] WebSocket transport (`ws_transport.ts`, 228 lines) — browser-compatible WebSocket transport layer implemented
+- [x] TypeScript tests for WebSocket transport (247 lines)
+
+### Planned
+- [ ] WASM pkg generation (`wasm-pack build`) and npm publish (`@amaters/sdk`)
+
 ## v0.2.2 (2026-06-19)
 
 ### Completed

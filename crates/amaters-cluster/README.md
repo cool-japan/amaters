@@ -4,13 +4,13 @@ Consensus layer for AmateRS (Ukehi - The Sacred Pledge)
 
 [![Alpha](https://img.shields.io/badge/status-alpha-orange)](https://github.com/cool-japan/amaters)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
-[![Version: 0.2.2](https://img.shields.io/badge/version-0.2.2-blue)](Cargo.toml)
+[![Version: 0.2.3](https://img.shields.io/badge/version-0.2.3-blue)](Cargo.toml)
 
 ## Overview
 
 `amaters-cluster` implements distributed consensus and cluster management for AmateRS using the **Ukehi** component. It provides a complete Raft consensus implementation with joint consensus membership changes, a batch-apply state machine with snapshotting, consistent hashing for data partitioning, and full node lifecycle management.
 
-**Status**: Alpha — 440 tests, ~495 public items.
+**Status**: Alpha — 495 public items, 0 stubs.
 
 ## Implemented Features
 
@@ -42,7 +42,30 @@ A complete, from-scratch Raft consensus implementation:
 - `PlacementScheduler` — background task driving periodic placement cycles with configurable `imbalance_threshold`
 - `RangePartitioner` — key-range to shard mapping via sorted `BTreeMap`; complement to the consistent-hash ring
 - `ShardRegistry::execute_split` / `execute_merge` / `execute_transfer` — atomic shard lifecycle transitions
-- `ClusterCommand` typed encoding for Raft log entries (replaces raw bytes)
+- `ClusterCommand` typed Raft log — 7 variants: `DataPut`, `DataDelete`, `PlaceSplit`, `PlaceMerge`, `PlaceTransfer`, `MembershipAdd`, `MembershipRemove` — encoded with `postcard` (replaces raw bytes)
+
+### Cluster Topology Management
+
+- `cluster_topology.rs` — `TopologyCollector` + `ClusterTopology` / `NodeStatus` types give a JSON-serialisable point-in-time snapshot of every node's health, state, shard count, and leader flag
+- Marks failed nodes offline; exposes shard distribution across the cluster
+- JSON-serialisable topology snapshot via `serde_json`
+
+### Cluster Command Abstraction
+
+- `cluster_command.rs` — typed command layer decoupling Raft log encoding from application logic
+- All shard lifecycle operations flow through `ClusterCommand` ensuring consistent serialisation at log boundaries
+
+### Failover Module
+
+- `failover.rs` — `FailoverCoordinator` with `should_redirect(my_id)` for client redirect on leader loss
+- `AlertEvent` enum (`LeaderChanged`, `NodeFailed`, `NodeRecovered`, `QuorumLost`, `SlowReplication`) and `AlertManager` fan-out hub
+- `FailoverController` monitors heartbeat timeouts and emits recovery events
+- Wired into `RaftNode` via `set_alert_manager`; leader-change and slow-replication events emitted automatically
+
+### Placement State Machine
+
+- `placement_state_machine.rs` — `PlacementStateMachine` parses committed `ClusterCommand` log entries and dispatches to `ShardRegistry::execute_split` / `execute_merge` / `execute_transfer`
+- Runs deterministically on the Raft leader's apply loop; no external coordination needed
 
 ### Snapshot Management
 
@@ -56,6 +79,7 @@ A complete, from-scratch Raft consensus implementation:
 - Streaming snapshot transfer to lagging followers without buffering entire snapshots in RAM
 - Per-peer `SnapshotStreamReceiver` stored in a `HashMap` keyed by `NodeId`
 - Automatic receiver cleanup on node restart or disconnection via `become_follower` / `step_down`
+- Configurable chunk size threshold; clean receiver cleanup on `become_follower` / `step_down`
 
 ### Write-Ahead Log (WAL v2)
 
@@ -84,8 +108,21 @@ A complete, from-scratch Raft consensus implementation:
 
 - `RuleEngine` — evaluates named alert rules against live cluster metrics at configurable intervals
 - `AlertSink` trait — pluggable destination for fired alerts (log, webhook, channel)
+- Severity levels: `Info`, `Warning`, `Critical` — with configurable dedup window to suppress repeated firings
 - `FiredAlert` — captures rule name, severity, message, and timestamp for each triggered rule
 - Integrated with `AlertManager` fan-out hub for leader-loss, quorum-loss, and slow-replication events
+
+## Chaos Engineering Tests
+
+10 adversarial in-memory Raft scenarios covering:
+
+- Random node crash and restart with persistent-state recovery
+- Network partition (minority cannot elect leader; majority continues; healing converges)
+- Message delay and loss simulation (dropping filter with fixed RNG seed)
+- Clock skew / term advancement and recovery via vote-response term-update path
+- Simultaneous two-node failure in a 5-node cluster (quorum maintained)
+
+All chaos tests live in `tests/chaos_tests.rs` and run without a live cluster.
 
 ## Architecture
 

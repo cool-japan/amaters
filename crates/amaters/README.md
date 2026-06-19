@@ -55,10 +55,10 @@ Add AmateRS to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-amaters = "0.2.2"
+amaters = "0.2.3"
 
 # Or with specific features
-amaters = { version = "0.2.2", features = ["full"] }
+amaters = { version = "0.2.3", features = ["full"] }
 ```
 
 > **Status**: Alpha — API is stabilising. Not yet recommended for production use.
@@ -159,21 +159,21 @@ If you need only specific functionality, you can use the individual crates direc
 ```toml
 [dependencies]
 # Core types and storage
-amaters-core = "0.2.2"
+amaters-core = "0.2.3"
 
 # Network layer
-amaters-net = "0.2.2"
+amaters-net = "0.2.3"
 
 # Consensus
-amaters-cluster = "0.2.2"
+amaters-cluster = "0.2.3"
 
 # Client SDK
-amaters-sdk-rust = "0.2.2"
+amaters-sdk-rust = "0.2.3"
 ```
 
 ## Development Status
 
-**Current Version**: 0.2.2 (Alpha)
+**Current Version**: 0.2.3 (Alpha)
 
 - Core storage engine (Iwato) - LSM-Tree with WAL and compaction
 - FHE compute engine (Yata) - TFHE-rs integration with predicate evaluation

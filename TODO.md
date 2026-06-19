@@ -4,7 +4,7 @@ This is the master TODO file tracking the overall project development across all
 
 ## Project Status: Phases 1-5 Core Complete, Phase 7 SDKs In Progress
 
-**Current Version**: 0.2.2 (2026-06-19)
+**Current Version**: 0.2.3 (Unreleased)
 **Target Version**: 1.0.0 (Production-Ready)
 **Estimated Timeline**: 12-18 months
 **Last Major Update**: 2026-06-02

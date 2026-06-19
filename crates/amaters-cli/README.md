@@ -2,7 +2,7 @@
 
 Command-line interface for AmateRS
 
-**Status:** Alpha | **Version:** 0.2.2 | **License:** Apache-2.0 | **Tests:** 208 | **Public items:** 87
+**Status:** Alpha | **Version:** 0.2.3 | **License:** Apache-2.0 | **Tests:** 208 | **Public items:** 72
 
 ## Overview
 
@@ -20,6 +20,7 @@ Command-line interface for AmateRS
 - **Batch operations**: `amaters-cli batch <file>` / `amaters-cli batch -` (stdin); `BatchCommand` with streaming `BufReader` (never buffers all); line-by-line `put`/`delete` op parsing; JSON mode for scripts
 - **Pagination flags**: `--limit <n>`, `--offset <n>`, `--cursor <token>` on `range`/`scan`/`query` subcommands; next cursor displayed in output
 - **Watch mode**: `amaters-cli watch <interval_secs> <command...>` re-executes a command on a tokio interval; ANSI screen clear between runs; Ctrl-C exits cleanly (no crossterm dependency)
+- **EXPLAIN command** — `explain <cmd>` in the REPL shows `QueryPlanner` logical and physical plan for get/set/delete/range without sending the operation to the server
 
 ## Installation
 

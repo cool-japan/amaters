@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -24,10 +24,10 @@ documentation = "https://docs.rs/amaters"
 
 [workspace.dependencies]
 # Internal crates
-amaters-core = { path = "crates/amaters-core", version = "0.2.2" }
-amaters-net = { path = "crates/amaters-net", version = "0.2.2" }
-amaters-cluster = { path = "crates/amaters-cluster", version = "0.2.2" }
-amaters-sdk-rust = { path = "crates/amaters-sdk-rust", version = "0.2.2" }
+amaters-core = { path = "crates/amaters-core", version = "0.2.3" }
+amaters-net = { path = "crates/amaters-net", version = "0.2.3" }
+amaters-cluster = { path = "crates/amaters-cluster", version = "0.2.3" }
+amaters-sdk-rust = { path = "crates/amaters-sdk-rust", version = "0.2.3" }
 
 # FHE and Cryptography
 tfhe = { version = "1.5", default-features = false }

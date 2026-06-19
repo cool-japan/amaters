@@ -1,6 +1,6 @@
 # amaters-net TODO
 
-## Implemented (v0.2.2) ✅
+## Implemented (v0.2.3) ✅
 
 - [x] gRPC service and server (tonic-based)
 - [x] AQL query client and server
@@ -71,9 +71,9 @@
   - **Risk:** Separate HTTP server must not interfere with gRPC port.
 - [x] OpenTelemetry distributed tracing integration (done 2026-06-14)
   - **Goal:** OTel-compatible field names in tracing spans for query type, collection, and FHE flag.
-- [x] W3C TraceContext header propagation (feature `telemetry`) — inject/extract `traceparent`/`tracestate` on all gRPC calls (done 0.2.2)
-  - **Design:** `tracing::info_span!` with `amaters.query.type`, `amaters.collection`, `amaters.fhe` fields in `execute_query`. Three helper functions `query_type_name`, `collection_name`, `uses_fhe` added outside the impl block. Using `.instrument(span)` pattern to keep the async future `Send`.
-  - **Files:** `crates/amaters-net/src/server.rs`
+- [x] W3C TraceContext header propagation (feature `telemetry`) — inject/extract `traceparent`/`tracestate` on all gRPC calls (done 0.2.3)
+  - **Design:** `TraceparentExtractor`, `inject_trace_context`, and `TraceContextPropagatorLayer` Tower Layer implemented in `otel_propagator.rs`. `tracing::info_span!` with `amaters.query.type`, `amaters.collection`, `amaters.fhe` fields in `execute_query`. Three helper functions `query_type_name`, `collection_name`, `uses_fhe` added outside the impl block. Using `.instrument(span)` pattern to keep the async future `Send`.
+  - **Files:** `crates/amaters-net/src/otel_propagator.rs`, `crates/amaters-net/src/server.rs`
   - **Tests:** `test_query_span_created` (net_integration_tests.rs)
 - [x] Active-connection gauge / bytes-sent / bytes-received / RTT histogram metrics (done 2026-05-07)
   - **Goal:** Extend `metrics_layer.rs` with active-request gauge, bytes sent/received counters, RTT histogram.
@@ -85,7 +85,8 @@
 ### Performance Optimization
 - [x] Zero-copy buffer management (done 2026-06-14)
   - **Note (2026-06-14):** `bytes = { version = "1" }` added to workspace deps. `cipher_blob_raw_bytes(&CipherBlob) -> bytes::Bytes` added to `convert.rs` as a zero-copy alternative that avoids the `to_vec()` copy inside `cipher_blob_to_proto`. Tests: `test_zero_copy_bytes_no_extra_allocation`, `test_cipher_blob_raw_bytes`. Full proto-level zero-copy deferred until prost-generated fields accept `bytes::Bytes` natively.
-- [x] `CircuitCache` — LRU cache for compiled FHE circuits; reduces recompilation overhead (done 0.2.2)
+- [x] `CircuitCache` — LRU cache for compiled FHE circuits; reduces recompilation overhead (done 0.2.3)
+  - **Design:** Thread-safe LRU cache backed by `parking_lot::Mutex`; blake3-keyed circuit identity; configurable capacity (default 256); LRU eviction on overflow.
 - [x] Request batching to reduce round-trips (done 2026-06-14)
   - **Goal:** Batch multiple queries in a single round-trip via `execute_batch`.
   - **Design:** `execute_batch` already implemented; integration tests verify correct batch ordering and atomicity.
