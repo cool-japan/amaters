@@ -30,7 +30,7 @@ amaters-cluster = { path = "crates/amaters-cluster", version = "0.2.3" }
 amaters-sdk-rust = { path = "crates/amaters-sdk-rust", version = "0.2.3" }
 
 # FHE and Cryptography
-tfhe = { version = "1.5", default-features = false }
+tfhe = { version = "1.6", default-features = false }
 
 # Async runtime and I/O
 tokio = { version = "1.52", features = ["full"] }
@@ -58,7 +58,7 @@ tower-layer = "0.3"
 tower-service = "0.3"
 http = "1.4"
 axum = "0.8"
-jsonwebtoken = { version = "9.3", features = ["use_pem"] }
+jsonwebtoken = { version = "10.4", features = ["use_pem"] }
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
 x509-parser = "0.18"
@@ -106,17 +106,17 @@ serde_yaml = "0.9"
 
 # Utilities
 bytemuck = { version = "1.25", features = ["derive"] }
-constant_time_eq = "0.4"
+constant_time_eq = "0.5"
 memmap2 = "0.9"
 crc32fast = "1.5"
 oxiarc-lz4 = "0.3.3"
 oxiarc-deflate = "0.3.3"
 blake3 = "1.8"  # Fast hashing
-siphasher = "0.3"  # SipHash-1-3 for encrypted index hashing
-aes-gcm = "0.10"  # AES-256-GCM authenticated encryption (pure Rust)
-hmac = "0.12"     # HMAC construction (pure Rust)
-sha2 = "0.10"     # SHA-2 hash family (pure Rust)
-hkdf = "0.12"     # HKDF key derivation (pure Rust)
+siphasher = "1.0"  # SipHash-1-3 for encrypted index hashing
+aes-gcm = "0.11"  # AES-256-GCM authenticated encryption (pure Rust)
+hmac = "0.13"     # HMAC construction (pure Rust)
+sha2 = "0.11"     # SHA-2 hash family (pure Rust)
+hkdf = "0.13"     # HKDF key derivation (pure Rust)
 uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 

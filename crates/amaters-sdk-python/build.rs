@@ -19,13 +19,13 @@ fn main() {
         let config = pyo3_build_config::get();
 
         // Emit the library to link against (e.g. `python3.11`)
-        if let Some(lib_name) = &config.lib_name {
-            let link_model = if config.shared { "" } else { "static=" };
+        if let Some(lib_name) = config.lib_name() {
+            let link_model = if config.shared() { "" } else { "static=" };
             println!("cargo:rustc-link-lib={link_model}{lib_name}");
         }
 
         // Emit the directory containing the Python shared library
-        if let Some(lib_dir) = &config.lib_dir {
+        if let Some(lib_dir) = config.lib_dir() {
             println!("cargo:rustc-link-search=native={lib_dir}");
         }
     }
