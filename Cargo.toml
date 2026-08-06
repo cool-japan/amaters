@@ -43,7 +43,7 @@ tokio-stream = "0.1"
 
 # Serialization
 rkyv = "0.8"
-oxicode = { version = "0.2.5", features = ["alloc", "serde"] }  # COOLJAPAN policy
+oxicode = { version = "0.2.6", features = ["alloc", "serde"] }  # COOLJAPAN policy
 
 # Networking
 bytes = { version = "1" }
